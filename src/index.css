@@ -1,0 +1,166 @@
+@import url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-3Light.woff2');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 100;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-1Thin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 200;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-2ExtraLight.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 300;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-3Light.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 400;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-4Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 500;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-5Medium.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 600;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-6Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'S-Core Dream';
+  font-weight: 700;
+  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-7ExtraBold.woff2') format('woff2');
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 97%;
+    --foreground: 220 30% 8%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 30% 8%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 30% 8%;
+
+    --primary: 152 60% 34%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 94%;
+    --secondary-foreground: 220 20% 22%;
+
+    --muted: 220 14% 94%;
+    --muted-foreground: 220 15% 28%;
+
+    --accent: 152 40% 92%;
+    --accent-foreground: 152 60% 26%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 88%;
+    --input: 220 13% 88%;
+    --ring: 152 60% 34%;
+
+    --radius: 0.625rem;
+
+    --success: 152 60% 34%;
+    --success-foreground: 152 60% 18%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 38 80% 18%;
+    --info: 210 100% 52%;
+    --info-foreground: 210 80% 18%;
+
+    --chart-1: 152 60% 34%;
+    --chart-2: 210 80% 52%;
+    --chart-3: 38 92% 50%;
+    --chart-4: 280 55% 55%;
+    --chart-5: 0 72% 51%;
+    --chart-6: 190 70% 42%;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 220 25% 12%;
+    --sidebar-primary: 152 60% 34%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 14% 94%;
+    --sidebar-accent-foreground: 220 14% 40%;
+    --sidebar-border: 220 13% 88%;
+    --sidebar-ring: 152 60% 34%;
+
+    --font-display: 'S-Core Dream', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-display);
+    font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+  }
+}
+
+@layer utilities {
+  /* 카드: 절제된 그림자, 과한 효과 없음 */
+  .panel {
+    @apply bg-card border border-border rounded-lg shadow-sm;
+  }
+  .glass-card {
+    @apply bg-card border border-border rounded-lg shadow-sm;
+  }
+
+  /* 재무 숫자: 고정폭 숫자로 자릿수 정렬 */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .num-neg {
+    @apply text-destructive;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(220 13% 88%) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 5px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(220 13% 84%);
+    border-radius: 3px;
+  }
+}
+
+/* 월간 리포트 인쇄 */
+@media print {
+  body * { visibility: hidden; }
+  #print-area, #print-area * { visibility: visible; }
+  #print-area {
+    position: absolute;
+    left: 0; top: 0;
+    width: 100%;
+    padding: 0 !important;
+  }
+  .no-print { display: none !important; }
+}
