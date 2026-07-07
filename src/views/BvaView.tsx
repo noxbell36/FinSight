@@ -1,10 +1,11 @@
 import { useMemo } from 'react';
 import type { MappedRow, BudgetRecord } from '@/types/finance';
 import type { AppSettings } from '@/types/settings';
-import { bvaByAccount, budgetVersions } from '@/lib/insights';
+import { bvaByAccount, budgetVersions, monthlyTotals } from '@/lib/insights';
 import { fmtWon, fmtPct, fmtCompact } from '@/lib/format';
 import { periodLabel } from '@/lib/normalize';
 import { MonthSelect, PageHeader, EmptyHint, KpiCard } from '@/components/shared';
+import { BudgetActualCombo } from '@/components/charts';
 
 interface Props {
   rows: MappedRow[];
@@ -36,6 +37,20 @@ export default function BvaView({ rows, budgets, periods, period, setPeriod, ver
       warnCount: withB.filter(r => (r.execRate ?? 0) > settings.budget_warning_threshold && (r.execRate ?? 0) <= 1).length,
     };
   }, [bva, settings.budget_warning_threshold]);
+
+  const comboData = useMemo(() => {
+    const actuals = monthlyTotals(rows).filter(d => d.period <= period).slice(-12);
+    const budgetByPeriod = new Map<string, number>();
+    for (const b of budgets) {
+      if (version && b.version !== version) continue;
+      budgetByPeriod.set(b.period, (budgetByPeriod.get(b.period) || 0) + b.amount);
+    }
+    return actuals.map(d => ({
+      label: d.period.slice(2).replace('-', '.'),
+      actual: d.amount,
+      budget: budgetByPeriod.has(d.period) ? budgetByPeriod.get(d.period)! : null,
+    }));
+  }, [rows, budgets, version, period]);
 
   if (budgets.length === 0) {
     return (
@@ -82,6 +97,11 @@ export default function BvaView({ rows, budgets, periods, period, setPeriod, ver
           sub={`초과 ${totals.overCount} · 경보(${Math.round(warnTh * 100)}%↑) ${totals.warnCount}`}
           subClass={totals.overCount > 0 ? 'text-destructive' : undefined}
         />
+      </div>
+
+      <div className="panel p-4 mb-5">
+        <h2 className="text-sm font-semibold mb-2">월별 실적 vs 예산 ({version ?? '-'}, 최근 12개월)</h2>
+        <BudgetActualCombo data={comboData} />
       </div>
 
       <div className="panel overflow-hidden">

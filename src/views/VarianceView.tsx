@@ -1,15 +1,16 @@
 import { useMemo, useState } from 'react';
-import { Sparkles, ChevronDown, ChevronRight } from 'lucide-react';
+import { Loader2, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import type { MappedRow, BudgetRecord, CommentaryEntry } from '@/types/finance';
+import type { MappedRow, BudgetRecord, CommentaryEntry, MonthlyAnalysis } from '@/types/finance';
 import type { AppSettings } from '@/types/settings';
-import { bvaByAccount, accountChanges, accountContext } from '@/lib/insights';
+import { bvaByAccount, accountChanges } from '@/lib/insights';
+import { findingOf } from '@/lib/aiPipeline';
 import { fmtWon, fmtPct, fmtChange } from '@/lib/format';
 import { periodLabel } from '@/lib/normalize';
 import { MonthSelect, PageHeader, EmptyHint } from '@/components/shared';
-import { geminiGenerate, hasGeminiKey, SYSTEM_VARIANCE } from '@/lib/gemini';
+import type { AnalysisStatus } from '@/components/InsightBriefing';
 
 interface Props {
   rows: MappedRow[];
@@ -21,6 +22,8 @@ interface Props {
   settings: AppSettings;
   commentary: CommentaryEntry[];
   upsertCommentary: (entry: CommentaryEntry) => void;
+  analysis: MonthlyAnalysis | null;
+  analysisStatus: AnalysisStatus;
 }
 
 interface TargetItem {
@@ -31,13 +34,11 @@ interface TargetItem {
   execRate: number | null;
   momDiff: number;
   momRate: number | null;
-  reasons: string[]; // 검토 대상 사유
+  reasons: string[];
 }
 
-export default function VarianceView({ rows, budgets, periods, period, setPeriod, version, settings, commentary, upsertCommentary }: Props) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [aiLoading, setAiLoading] = useState<string | null>(null);
+export default function VarianceView({ rows, budgets, periods, period, setPeriod, version, settings, commentary, upsertCommentary, analysis, analysisStatus }: Props) {
+  const [edits, setEdits] = useState<Record<string, string>>({}); // 사용자가 손댄 텍스트만 보관
 
   const targets = useMemo<TargetItem[]>(() => {
     const bva = bvaByAccount(rows, budgets, period, version);
@@ -63,13 +64,11 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
       return map.get(name)!;
     };
 
-    // ① 예산 집행률 임계치 초과
     for (const r of bva) {
       if (r.execRate != null && r.execRate > settings.budget_warning_threshold) {
         ensure(r.account_name).reasons.push(r.execRate > 1 ? `예산 초과 (집행률 ${fmtPct(r.execRate)})` : `집행률 경보 (${fmtPct(r.execRate)})`);
       }
     }
-    // ② 전월비 변동률 임계치 초과
     for (const c of changes) {
       if (c.rate != null && Math.abs(c.rate) > settings.change_rate_threshold && Math.abs(c.diff) > 0) {
         ensure(c.account_name).reasons.push(`전월비 ${fmtChange(c.rate)} (${c.diff >= 0 ? '+' : '△'}${fmtWon(Math.abs(c.diff))}원)`);
@@ -82,116 +81,140 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
 
   const entryOf = (account: string) => commentary.find(c => c.id === `${period}:${account}`);
 
-  const handleAIDraft = async (item: TargetItem) => {
-    setAiLoading(item.account_name);
-    try {
-      const ctx = accountContext(rows, period, item.account_name);
-      const prompt = [
-        `계정: ${item.account_name} / 귀속월: ${periodLabel(period)}`,
-        `당월 실적: ${fmtWon(item.actual)}원`,
-        item.budget != null ? `당월 예산(${version}): ${fmtWon(item.budget)}원, 차이: ${fmtWon(item.variance)}원, 집행률: ${fmtPct(item.execRate)}` : '예산 미편성',
-        `전월비 증감: ${item.momDiff >= 0 ? '+' : '△'}${fmtWon(Math.abs(item.momDiff))}원 (${item.momRate != null ? fmtChange(item.momRate) : '신규'})`,
-        `검토 대상 사유: ${item.reasons.join(' / ')}`,
-        `당월 전표 ${ctx.txCount}건`,
-        ctx.memos.length ? `적요: ${ctx.memos.join(' | ')}` : '적요 미기재',
-        ctx.vendors.length ? `주요 거래처: ${ctx.vendors.join(', ')}` : '',
-        '',
-        '위 데이터에 근거해 변동사유 보고 초안을 작성하십시오.',
-      ].join('\n');
-      const text = await geminiGenerate(prompt, { system: SYSTEM_VARIANCE, model: settings.gemini_model });
-      setDrafts(prev => ({ ...prev, [item.account_name]: text }));
-      toast.success('AI 초안 생성 완료 — 검토 후 저장해주세요.');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'AI 초안 생성 실패');
-    } finally {
-      setAiLoading(null);
-    }
+  /** 표시 우선순위: 사용자 수정 중 텍스트 > 저장된 사유 > AI 배치 초안 */
+  const textOf = (item: TargetItem): { text: string; origin: 'edit' | 'saved' | 'ai' | 'empty' } => {
+    const key = `${period}:${item.account_name}`;
+    if (edits[key] !== undefined) return { text: edits[key], origin: 'edit' };
+    const entry = entryOf(item.account_name);
+    if (entry?.reason) return { text: entry.reason, origin: 'saved' };
+    const draft = findingOf(analysis, item.account_name)?.draft;
+    if (draft) return { text: draft, origin: 'ai' };
+    return { text: '', origin: 'empty' };
   };
 
   const handleSave = (item: TargetItem, status: 'draft' | 'confirmed') => {
-    const text = (drafts[item.account_name] ?? entryOf(item.account_name)?.reason ?? '').trim();
-    if (!text) { toast.error('사유를 입력해주세요.'); return; }
+    const { text, origin } = textOf(item);
+    const trimmed = text.trim();
+    if (!trimmed) { toast.error('사유가 비어 있습니다.'); return; }
     upsertCommentary({
       id: `${period}:${item.account_name}`,
       period,
       account_name: item.account_name,
       variance_amount: item.variance ?? 0,
       mom_amount: item.momDiff,
-      reason: text,
+      reason: trimmed,
       status,
-      source: drafts[item.account_name] && drafts[item.account_name] === text ? 'ai-draft' : 'user',
+      source: origin === 'ai' ? 'ai-draft' : 'user',
       updated_at: new Date().toISOString(),
     });
-    toast.success(status === 'confirmed' ? '변동사유 확정 완료 (월간 리포트에 반영)' : '임시 저장 완료');
+    toast.success(status === 'confirmed' ? `${item.account_name} 사유 확정 (월간 리포트 반영)` : '임시 저장 완료');
+  };
+
+  const handleConfirmAll = () => {
+    let n = 0;
+    for (const item of targets) {
+      const { text, origin } = textOf(item);
+      if (!text.trim()) continue;
+      const entry = entryOf(item.account_name);
+      if (entry?.status === 'confirmed' && origin !== 'edit') continue;
+      upsertCommentary({
+        id: `${period}:${item.account_name}`,
+        period,
+        account_name: item.account_name,
+        variance_amount: item.variance ?? 0,
+        mom_amount: item.momDiff,
+        reason: text.trim(),
+        status: 'confirmed',
+        source: origin === 'ai' ? 'ai-draft' : 'user',
+        updated_at: new Date().toISOString(),
+      });
+      n++;
+    }
+    toast.success(`${n}건 일괄 확정 완료`);
   };
 
   const confirmedCount = targets.filter(t => entryOf(t.account_name)?.status === 'confirmed').length;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 max-w-5xl mx-auto">
       <PageHeader
         title="차이분석 · 변동사유"
-        desc={`${periodLabel(period)} · 집행률 ${Math.round(settings.budget_warning_threshold * 100)}% 초과 또는 전월비 ±${Math.round(settings.change_rate_threshold * 100)}% 이상 계정 · 확정 ${confirmedCount}/${targets.length}`}
-        right={<MonthSelect periods={periods} value={period} onChange={setPeriod} />}
+        desc={`${periodLabel(period)} · AI가 전 항목 초안을 자동 작성 — 검토 후 수정·확정하면 월간 리포트에 반영됩니다 · 확정 ${confirmedCount}/${targets.length}`}
+        right={
+          <>
+            <Button variant="outline" size="sm" onClick={handleConfirmAll} disabled={targets.length === 0}>전체 일괄 확정</Button>
+            <MonthSelect periods={periods} value={period} onChange={setPeriod} />
+          </>
+        }
       />
+
+      {analysisStatus === 'running' && (
+        <div className="panel p-3 mb-4 flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> AI가 변동사유 초안을 작성하는 중입니다… 완료되면 아래 입력란에 자동으로 채워집니다.
+        </div>
+      )}
+      {analysisStatus === 'no-key' && (
+        <div className="panel p-3 mb-4 text-sm text-muted-foreground">
+          환경 설정에서 Gemini API 키를 입력하면 초안이 자동 생성됩니다. 현재는 직접 입력만 가능합니다.
+        </div>
+      )}
 
       {targets.length === 0 ? (
         <EmptyHint>이번 달은 검토 기준을 초과한 계정이 없습니다. 환경 설정에서 임계치를 조정할 수 있습니다.</EmptyHint>
       ) : (
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           {targets.map(item => {
             const entry = entryOf(item.account_name);
-            const isOpen = expanded === item.account_name;
-            const draftText = drafts[item.account_name] ?? entry?.reason ?? '';
+            const { text, origin } = textOf(item);
+            const finding = findingOf(analysis, item.account_name);
+            const key = `${period}:${item.account_name}`;
             return (
-              <div key={item.account_name} className="panel overflow-hidden">
-                <button
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
-                  onClick={() => setExpanded(isOpen ? null : item.account_name)}
-                >
-                  {isOpen ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />}
-                  <span className="font-medium w-36 shrink-0">{item.account_name}</span>
-                  <span className="text-xs text-muted-foreground flex-1">{item.reasons.join(' · ')}</span>
-                  <span className="num text-sm w-32 text-right shrink-0">{fmtWon(item.actual)}원</span>
+              <div key={item.account_name} className="panel p-4">
+                {/* 헤더 라인 */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="font-semibold">{item.account_name}</span>
+                  <span className="text-xs text-muted-foreground flex-1 min-w-[180px]">{item.reasons.join(' · ')}</span>
                   {entry?.status === 'confirmed' ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-accent text-accent-foreground shrink-0">확정</span>
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-accent text-accent-foreground flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> 확정</span>
+                  ) : origin === 'ai' ? (
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning-foreground))]">AI 초안 — 검토 전</span>
                   ) : entry ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">작성 중</span>
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-secondary text-muted-foreground">작성 중</span>
                   ) : (
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning-foreground))] shrink-0">미작성</span>
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-muted text-muted-foreground">미작성</span>
                   )}
-                </button>
+                </div>
 
-                {isOpen && (
-                  <div className="px-4 pb-4 pt-1 border-t border-border">
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted-foreground my-3">
-                      <div>당월 실적 <span className="num text-foreground block">{fmtWon(item.actual)}원</span></div>
-                      <div>당월 예산 <span className="num text-foreground block">{item.budget != null ? `${fmtWon(item.budget)}원` : '미편성'}</span></div>
-                      <div>차이 B/(W) <span className={`num block ${item.variance != null && item.variance < 0 ? 'text-destructive' : 'text-foreground'}`}>{item.variance != null ? `${fmtWon(item.variance)}원` : '-'}</span></div>
-                      <div>전월비 <span className="num text-foreground block">{item.momDiff >= 0 ? '+' : '△'}{fmtWon(Math.abs(item.momDiff))}원</span></div>
-                    </div>
-                    <Textarea
-                      value={draftText}
-                      onChange={e => setDrafts(prev => ({ ...prev, [item.account_name]: e.target.value }))}
-                      placeholder="변동사유를 입력하세요. (예: 2026-06 신규 채용 3명분 급여 반영, 7월부터 정상화 예정)"
-                      className="min-h-[88px] text-sm"
-                    />
-                    <div className="flex items-center gap-2 mt-2.5">
-                      {hasGeminiKey() && (
-                        <Button variant="outline" size="sm" className="gap-1.5" disabled={aiLoading === item.account_name} onClick={() => handleAIDraft(item)}>
-                          <Sparkles className="h-3.5 w-3.5" />
-                          {aiLoading === item.account_name ? '생성 중…' : 'AI 초안 (검토 필요)'}
-                        </Button>
-                      )}
-                      <div className="flex-1" />
-                      <Button variant="outline" size="sm" onClick={() => handleSave(item, 'draft')}>임시 저장</Button>
-                      <Button size="sm" onClick={() => handleSave(item, 'confirmed')}>사유 확정</Button>
-                    </div>
-                    {entry?.source === 'ai-draft' && (
-                      <p className="text-[11px] text-muted-foreground mt-2">이 사유는 AI 초안 기반입니다 — 담당자 검토를 거쳐 확정하십시오.</p>
-                    )}
+                {/* 수치 요약 */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted-foreground my-3">
+                  <div>당월 실적 <span className="num text-foreground block">{fmtWon(item.actual)}원</span></div>
+                  <div>당월 예산 <span className="num text-foreground block">{item.budget != null ? `${fmtWon(item.budget)}원` : '미편성'}</span></div>
+                  <div>차이 B/(W) <span className={`num block ${item.variance != null && item.variance < 0 ? 'text-destructive' : 'text-foreground'}`}>{item.variance != null ? `${fmtWon(item.variance)}원` : '-'}</span></div>
+                  <div>전월비 <span className="num text-foreground block">{item.momDiff >= 0 ? '+' : '△'}{fmtWon(Math.abs(item.momDiff))}원 {item.momRate != null ? `(${fmtChange(item.momRate)})` : ''}</span></div>
+                </div>
+
+                {/* AI 원인/권고 (있을 때) */}
+                {(finding?.cause || finding?.action) && (
+                  <div className="rounded-md bg-secondary/60 px-3 py-2 mb-2.5 text-xs leading-relaxed space-y-0.5">
+                    {finding.cause && <p><span className="text-muted-foreground">원인(AI):</span> {finding.cause}</p>}
+                    {finding.action && <p><span className="text-muted-foreground">권고:</span> {finding.action}</p>}
                   </div>
                 )}
+
+                <Textarea
+                  value={text}
+                  onChange={e => setEdits(prev => ({ ...prev, [key]: e.target.value }))}
+                  placeholder={analysisStatus === 'running' ? 'AI 초안 작성 중…' : '변동사유를 입력하세요.'}
+                  className="min-h-[76px] text-sm"
+                />
+                <div className="flex items-center gap-2 mt-2.5">
+                  <p className="text-[11px] text-muted-foreground flex-1">
+                    {origin === 'ai' && 'AI 초안입니다 — 검토 후 확정하십시오.'}
+                    {entry?.source === 'ai-draft' && origin === 'saved' && 'AI 초안 기반으로 저장된 사유입니다.'}
+                  </p>
+                  <Button variant="outline" size="sm" onClick={() => handleSave(item, 'draft')}>임시 저장</Button>
+                  <Button size="sm" onClick={() => handleSave(item, 'confirmed')}>사유 확정</Button>
+                </div>
               </div>
             );
           })}

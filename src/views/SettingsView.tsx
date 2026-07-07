@@ -10,9 +10,10 @@ import { PageHeader } from '@/components/shared';
 interface Props {
   settings: AppSettings;
   setSettings: (s: AppSettings) => void;
+  onKeyChanged?: () => void;
 }
 
-export default function SettingsView({ settings, setSettings }: Props) {
+export default function SettingsView({ settings, setSettings, onKeyChanged }: Props) {
   const [keyInput, setKeyInput] = useState(getGeminiKey());
   const [testing, setTesting] = useState(false);
 
@@ -27,11 +28,13 @@ export default function SettingsView({ settings, setSettings }: Props) {
 
   const handleSaveKey = () => {
     setGeminiKey(keyInput);
+    onKeyChanged?.();
     toast.success(keyInput ? 'API 키 저장 완료 (이 브라우저에만 저장됨)' : 'API 키 삭제 완료');
   };
 
   const handleTest = async () => {
     setGeminiKey(keyInput);
+    onKeyChanged?.();
     setTesting(true);
     try {
       await geminiGenerate('연결 테스트입니다. "OK"라고만 답하십시오.', { model: settings.gemini_model });

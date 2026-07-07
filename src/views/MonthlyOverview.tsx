@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import type { MappedRow, BudgetRecord } from '@/types/finance';
+import type { MappedRow, BudgetRecord, MonthlyAnalysis } from '@/types/finance';
 import type { AppSettings } from '@/types/settings';
-import { computeKpis, accountChanges, byAccount, byCostCenter, monthlyTotals } from '@/lib/insights';
-import { fmtWon, fmtCompact, fmtPct, fmtChange, numClass } from '@/lib/format';
+import type { MonthlyInsightPack } from '@/lib/insightEngine';
+import { computeKpis, accountChanges, byAccount, byCostCenter, monthlyTotals, totalOf } from '@/lib/insights';
+import { fmtWon, fmtCompact, fmtPct, fmtChange } from '@/lib/format';
 import { periodLabel, prevPeriod } from '@/lib/normalize';
 import { MonthSelect, KpiCard, PageHeader } from '@/components/shared';
+import { WaterfallChart, CompositionDonut } from '@/components/charts';
+import InsightBriefing, { type AnalysisStatus } from '@/components/InsightBriefing';
 
 interface Props {
   rows: MappedRow[];
@@ -15,12 +18,18 @@ interface Props {
   setPeriod: (p: string) => void;
   version: string | null;
   settings: AppSettings;
+  pack: MonthlyInsightPack | null;
+  analysis: MonthlyAnalysis | null;
+  analysisStatus: AnalysisStatus;
 }
 
-export default function MonthlyOverview({ rows, budgets, periods, period, setPeriod, version, settings }: Props) {
+export default function MonthlyOverview({ rows, budgets, periods, period, setPeriod, version, settings, pack, analysis, analysisStatus }: Props) {
   const kpi = useMemo(() => computeKpis(rows, budgets, period, version), [rows, budgets, period, version]);
   const changes = useMemo(() => accountChanges(rows, period), [rows, period]);
   const [ccFilter, setCcFilter] = useState('all');
+
+  const totalSeries = useMemo(() => monthlyTotals(rows).filter(d => d.period <= period).slice(-12), [rows, period]);
+  const sparkTotals = totalSeries.map(d => d.amount);
 
   const accountTable = useMemo(() => {
     const filtered = ccFilter === 'all' ? rows : rows.filter(r => (r.cost_center || '미분류') === ccFilter);
@@ -43,14 +52,12 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
       .sort((a, b) => b.value - a.value),
   [rows, period]);
 
-  const trend = useMemo(() => {
-    const all = monthlyTotals(rows);
-    return all.slice(-12).map(d => ({ ...d, label: d.period.slice(2).replace('-', '.') }));
-  }, [rows]);
-
+  const trend = useMemo(() => totalSeries.map(d => ({ ...d, label: d.period.slice(2).replace('-', '.') })), [totalSeries]);
   const ccList = useMemo(() => Array.from(new Set(rows.map(r => r.cost_center || '미분류'))).sort(), [rows]);
-  const topUp = changes.filter(c => c.diff > 0).slice(0, 5);
-  const topDown = changes.filter(c => c.diff < 0).slice(0, 5);
+
+  const prevP = prevPeriod(period);
+  const hasPrev = periods.includes(prevP);
+  const prevTotal = hasPrev ? totalOf(rows, prevP) : 0;
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -60,9 +67,12 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
         right={<MonthSelect periods={periods} value={period} onChange={setPeriod} />}
       />
 
+      {/* AI 브리핑 + 인사이트 카드 — 상시 노출 */}
+      {pack && <InsightBriefing items={pack.items} analysis={analysis} status={analysisStatus} />}
+
       {/* KPI */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
-        <KpiCard label="당월 총비용" value={fmtCompact(kpi.total)} sub={`${fmtWon(kpi.total)}원`} />
+        <KpiCard label="당월 총비용" value={fmtCompact(kpi.total)} sub={`${fmtWon(kpi.total)}원`} spark={sparkTotals} />
         <KpiCard
           label="전월비"
           value={kpi.momRate != null ? fmtChange(kpi.momRate) : '-'}
@@ -83,50 +93,44 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
         />
       </div>
 
+      {/* 워터폴 + 부서 도넛 */}
       <div className="grid lg:grid-cols-3 gap-4 mb-5">
-        {/* 12개월 추이 */}
         <div className="panel p-4 lg:col-span-2">
-          <h2 className="text-sm font-semibold mb-3">월별 총비용 추이 (최근 12개월)</h2>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={trend} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 13% 90%)" vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-              <YAxis tickFormatter={(v) => fmtCompact(v)} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={52} />
-              <Tooltip formatter={(v: number) => [`${fmtWon(v)}원`, '총비용']} labelStyle={{ fontSize: 12 }} contentStyle={{ fontSize: 12 }} />
-              <Bar dataKey="amount" radius={[3, 3, 0, 0]}
-                   fill="hsl(152 60% 34%)" />
-            </BarChart>
-          </ResponsiveContainer>
+          <h2 className="text-sm font-semibold mb-1">전월비 증감 분해 (워터폴)</h2>
+          <p className="text-xs text-muted-foreground mb-2">어느 계정이 총비용을 밀어올리고 끌어내렸는지 — 붉은색 증가 / 파란색 감소</p>
+          {pack && hasPrev ? (
+            <WaterfallChart
+              prevTotal={prevTotal}
+              currTotal={kpi.total}
+              steps={pack.waterfall}
+              prevLabel={prevP.slice(2).replace('-', '.')}
+              currLabel={period.slice(2).replace('-', '.')}
+            />
+          ) : (
+            <p className="text-xs text-muted-foreground py-8 text-center">전월 데이터가 있어야 표시됩니다.</p>
+          )}
         </div>
-        {/* 부서별 */}
         <div className="panel p-4">
-          <h2 className="text-sm font-semibold mb-3">부서별 비용 ({periodLabel(period)})</h2>
-          <div className="space-y-2.5">
-            {ccData.map(cc => {
-              const max = ccData[0]?.value || 1;
-              return (
-                <div key={cc.name}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span>{cc.name}</span>
-                    <span className="num text-muted-foreground">{fmtCompact(cc.value)}</span>
-                  </div>
-                  <div className="h-1.5 rounded bg-secondary overflow-hidden">
-                    <div className="h-full bg-primary/70 rounded" style={{ width: `${(cc.value / max) * 100}%` }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <h2 className="text-sm font-semibold mb-2">부서별 구성 ({periodLabel(period)})</h2>
+          <CompositionDonut data={ccData} />
         </div>
       </div>
 
-      {/* 전월비 상위 증감 */}
-      <div className="grid md:grid-cols-2 gap-4 mb-5">
-        <ChangeList title="전월비 증가 상위" items={topUp} negative={false} />
-        <ChangeList title="전월비 감소 상위" items={topDown} negative />
+      {/* 12개월 추이 */}
+      <div className="panel p-4 mb-5">
+        <h2 className="text-sm font-semibold mb-3">월별 총비용 추이 (최근 12개월)</h2>
+        <ResponsiveContainer width="100%" height={200}>
+          <BarChart data={trend} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 13% 90%)" vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
+            <YAxis tickFormatter={(v) => fmtCompact(v)} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={52} />
+            <Tooltip formatter={(v: number) => [`${fmtWon(v)}원`, '총비용']} labelStyle={{ fontSize: 12 }} contentStyle={{ fontSize: 12 }} />
+            <Bar dataKey="amount" radius={[3, 3, 0, 0]} fill="hsl(152 60% 34%)" />
+          </BarChart>
+        </ResponsiveContainer>
       </div>
 
-      {/* 계정별 상세 */}
+      {/* 계정별 상세 — 상시 전체 노출 */}
       <div className="panel overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold">계정별 상세 ({periodLabel(period)})</h2>
@@ -144,6 +148,7 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
                 <th className="px-4 py-2 text-right font-medium">비중</th>
                 <th className="px-4 py-2 text-right font-medium">전월</th>
                 <th className="px-4 py-2 text-right font-medium">증감액</th>
+                <th className="px-4 py-2 text-right font-medium">증감률</th>
               </tr>
             </thead>
             <tbody>
@@ -153,8 +158,11 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
                   <td className="px-4 py-2 text-right num">{fmtWon(a.amount)}</td>
                   <td className="px-4 py-2 text-right num text-muted-foreground">{fmtPct(a.share)}</td>
                   <td className="px-4 py-2 text-right num text-muted-foreground">{fmtWon(a.prev)}</td>
-                  <td className={`px-4 py-2 text-right ${a.diff > 0 ? 'num text-destructive' : numClass(-1)}`}>
+                  <td className={`px-4 py-2 text-right num ${a.diff > 0 ? 'text-destructive' : ''}`}>
                     {a.diff >= 0 ? `+${fmtWon(a.diff)}` : `(${fmtWon(Math.abs(a.diff))})`}
+                  </td>
+                  <td className="px-4 py-2 text-right num text-muted-foreground">
+                    {a.prev !== 0 ? fmtChange(a.diff / a.prev) : a.amount > 0 ? '신규' : '-'}
                   </td>
                 </tr>
               ))}
@@ -162,29 +170,6 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
           </table>
         </div>
       </div>
-    </div>
-  );
-}
-
-function ChangeList({ title, items, negative }: { title: string; items: { account_name: string; diff: number; rate: number | null }[]; negative: boolean }) {
-  return (
-    <div className="panel p-4">
-      <h2 className="text-sm font-semibold mb-3">{title}</h2>
-      {items.length === 0 ? (
-        <p className="text-xs text-muted-foreground">해당 항목 없음</p>
-      ) : (
-        <div className="space-y-2">
-          {items.map(c => (
-            <div key={c.account_name} className="flex items-center justify-between text-sm">
-              <span>{c.account_name}</span>
-              <span className={`num ${negative ? 'text-primary' : 'text-destructive'}`}>
-                {negative ? `(${fmtWon(Math.abs(c.diff))})` : `+${fmtWon(c.diff)}`}
-                <span className="text-xs text-muted-foreground ml-1.5">{c.rate != null ? fmtChange(c.rate) : '신규'}</span>
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

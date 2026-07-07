@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, AlertCircle, Info, ChevronDown, ChevronRight } from 'lucide-react';
 import type { MappedRow } from '@/types/finance';
 import type { AppSettings } from '@/types/settings';
@@ -6,6 +6,7 @@ import { runReviewChecks, reviewKey } from '@/lib/reviewChecks';
 import { fmtWon } from '@/lib/format';
 import { periodLabel } from '@/lib/normalize';
 import { MonthSelect, PageHeader, KpiCard } from '@/components/shared';
+import { DailyExpenseArea } from '@/components/charts';
 
 interface Props {
   rows: MappedRow[];
@@ -25,7 +26,28 @@ const sevIcon = {
 
 export default function VoucherReview({ rows, periods, period, setPeriod, settings, reviews, setReviewStatus }: Props) {
   const checks = useMemo(() => runReviewChecks(rows, period, settings), [rows, period, settings]);
-  const [open, setOpen] = useState<string | null>(checks.find(c => c.hits.length > 0)?.id ?? null);
+
+  // 기본값: 검출이 있는 검사는 전부 펼침 (월 변경 시 재계산)
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setOpen(new Set(checks.filter(c => c.hits.length > 0).map(c => c.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period]);
+
+  const toggle = (id: string) => setOpen(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const daily = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+      if (r.period !== period || !r.posting_date) continue;
+      m.set(r.posting_date, (m.get(r.posting_date) || 0) + (r.curr_amount ?? 0));
+    }
+    return Array.from(m.entries()).map(([date, amount]) => ({ date, amount })).sort((a, b) => a.date.localeCompare(b.date));
+  }, [rows, period]);
 
   const totalHits = checks.reduce((s, c) => s + c.hits.length, 0);
   const doneCount = checks.reduce((s, c) => s + c.hits.filter(h => reviews[reviewKey(c.id, h.row)] === 'done').length, 0);
@@ -39,20 +61,26 @@ export default function VoucherReview({ rows, periods, period, setPeriod, settin
         right={<MonthSelect periods={periods} value={period} onChange={setPeriod} />}
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
         <KpiCard label="검출 항목" value={`${totalHits}건`} sub={`검사 규칙 ${checks.length}종`} />
         <KpiCard label="검토 완료" value={`${doneCount}건`} subClass="text-primary" sub={totalHits > 0 ? `${Math.round((doneCount / totalHits) * 100)}% 처리` : undefined} />
         <KpiCard label="소명 필요" value={`${flaggedCount}건`} subClass={flaggedCount > 0 ? 'text-destructive' : undefined} sub="담당 부서 확인 요청" />
         <KpiCard label="미처리" value={`${totalHits - doneCount - flaggedCount}건`} />
       </div>
 
+      <div className="panel p-4 mb-4">
+        <h2 className="text-sm font-semibold mb-1">일별 지출 분포 ({periodLabel(period)})</h2>
+        <p className="text-xs text-muted-foreground mb-2">특정 일자에 지출이 몰려 있으면 마감 몰아치기·분할 결제 여부를 함께 확인하십시오.</p>
+        <DailyExpenseArea data={daily} />
+      </div>
+
       <div className="space-y-2.5">
         {checks.map(check => {
-          const isOpen = open === check.id;
+          const isOpen = open.has(check.id);
           const pending = check.hits.filter(h => !reviews[reviewKey(check.id, h.row)]).length;
           return (
             <div key={check.id} className="panel overflow-hidden">
-              <button className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/40" onClick={() => setOpen(isOpen ? null : check.id)}>
+              <button className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/40" onClick={() => toggle(check.id)}>
                 {isOpen ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
                 {sevIcon[check.severity]}
                 <span className="font-medium">{check.label}</span>
@@ -87,7 +115,7 @@ export default function VoucherReview({ rows, periods, period, setPeriod, settin
                             <td className="px-4 py-2 text-xs">{hit.row.account_name}<span className="text-muted-foreground"> / {hit.row.cost_center ?? '-'}</span></td>
                             <td className="px-4 py-2 text-xs">{hit.row.vendor ?? '-'}</td>
                             <td className="px-4 py-2 text-right num">{fmtWon(hit.row.gross_amount ?? hit.row.curr_amount)}</td>
-                            <td className="px-4 py-2 text-xs text-muted-foreground">{hit.detail}{hit.row.memo ? '' : check.id !== 'memo' ? ' · 적요 없음' : ''}</td>
+                            <td className="px-4 py-2 text-xs text-muted-foreground">{hit.detail}</td>
                             <td className="px-4 py-2">
                               <div className="flex justify-center gap-1.5">
                                 <button

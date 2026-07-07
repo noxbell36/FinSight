@@ -20,14 +20,14 @@ export function hasGeminiKey(): boolean {
   return getGeminiKey().length > 0;
 }
 
-export async function geminiGenerate(prompt: string, opts: { system?: string; model: string }): Promise<string> {
+export async function geminiGenerate(prompt: string, opts: { system?: string; model: string; maxTokens?: number }): Promise<string> {
   const key = getGeminiKey();
   if (!key) throw new Error('Gemini API 키가 설정되지 않았습니다. 환경 설정에서 입력해주세요.');
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${opts.model}:generateContent?key=${encodeURIComponent(key)}`;
   const body: Record<string, unknown> = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.3, maxOutputTokens: opts.maxTokens ?? 1024 },
   };
   if (opts.system) body.systemInstruction = { parts: [{ text: opts.system }] };
 
@@ -52,7 +52,7 @@ export async function geminiGenerate(prompt: string, opts: { system?: string; mo
 }
 
 /** JSON 응답 전용 (매핑 제안 등) */
-export async function geminiJSON<T>(prompt: string, opts: { system?: string; model: string }): Promise<T> {
+export async function geminiJSON<T>(prompt: string, opts: { system?: string; model: string; maxTokens?: number }): Promise<T> {
   const raw = await geminiGenerate(prompt + '\n\n반드시 JSON만 출력하십시오. 마크다운 코드펜스·설명 금지.', opts);
   const cleaned = raw.replace(/^```(?:json)?/m, '').replace(/```$/m, '').trim();
   return JSON.parse(cleaned) as T;

@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import type { AppStore, CommentaryEntry, DatasetMeta, MappingProfile } from '@/types/finance';
+import type { AppStore, CommentaryEntry, DatasetMeta, MappingProfile, MonthlyAnalysis } from '@/types/finance';
 import { EMPTY_STORE } from '@/types/finance';
 import type { AppSettings } from '@/types/settings';
 import { DEFAULT_SETTINGS, SETTINGS_STORAGE_KEY } from '@/types/settings';
 import { kvGet, kvSet, kvClearAll } from '@/lib/db';
 import { availablePeriods, budgetVersions } from '@/lib/insights';
+import { buildMonthlyInsights } from '@/lib/insightEngine';
+import { runMonthlyAnalysis, analysisMapKey, analysisCacheKey, isAnalysisValid } from '@/lib/aiPipeline';
+import { hasGeminiKey } from '@/lib/gemini';
 import { generateDemoTransactions, generateDemoBudgets, demoDatasetMetas } from '@/lib/demoData';
 import FileUpload, { type SheetData } from '@/components/FileUpload';
 import ColumnMapper, { type MappingConfirmPayload } from '@/components/ColumnMapper';
 import AppSidebar from '@/components/AppSidebar';
+import type { AnalysisStatus } from '@/components/InsightBriefing';
 import MonthlyOverview from '@/views/MonthlyOverview';
 import BvaView from '@/views/BvaView';
 import VarianceView from '@/views/VarianceView';
@@ -20,7 +24,7 @@ import ReportView from '@/views/ReportView';
 import DataManager from '@/views/DataManager';
 import SettingsView from '@/views/SettingsView';
 
-const STORE_KEYS = ['transactions', 'budgets', 'datasets', 'commentary', 'reviews', 'profiles', 'reportNotes'] as const;
+const STORE_KEYS = ['transactions', 'budgets', 'datasets', 'commentary', 'reviews', 'profiles', 'reportNotes', 'analyses'] as const;
 
 interface UploadFlow {
   kind: 'actual' | 'budget';
@@ -35,9 +39,12 @@ const Index = () => {
   const [uploadFlow, setUploadFlow] = useState<UploadFlow | null>(null);
   const [period, setPeriodState] = useState<string>('');
   const [version, setVersionState] = useState<string | null>(null);
+  const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>('idle');
+  const [keyBump, setKeyBump] = useState(0); // Gemini 키 저장 시 자동 분석 재시도 트리거
   const loaded = useRef(false);
+  const runningKey = useRef<string | null>(null);
 
-  // ── 초기 로드 (IndexedDB + localStorage 설정) ──
+  // ── 초기 로드 ──
   useEffect(() => {
     (async () => {
       const next: AppStore = { ...EMPTY_STORE };
@@ -54,7 +61,7 @@ const Index = () => {
     })();
   }, []);
 
-  // ── 저장 (로드 완료 후 변경 시) ──
+  // ── 저장 ──
   useEffect(() => {
     if (!loaded.current || !store) return;
     for (const key of STORE_KEYS) kvSet(key, store[key]);
@@ -68,13 +75,11 @@ const Index = () => {
   const periods = useMemo(() => (store ? availablePeriods(store.transactions) : []), [store]);
   const versions = useMemo(() => (store ? budgetVersions(store.budgets) : []), [store]);
 
-  // 선택 월 기본값: 최신월
   useEffect(() => {
     if (periods.length === 0) return;
     if (!period || !periods.includes(period)) setPeriodState(periods[periods.length - 1]);
   }, [periods, period]);
 
-  // 예산 버전 기본값: '수정예산' 우선, 없으면 마지막
   useEffect(() => {
     if (versions.length === 0) { setVersionState(null); return; }
     if (!version || !versions.includes(version)) {
@@ -82,11 +87,48 @@ const Index = () => {
     }
   }, [versions, version]);
 
-  // ── 액션들 ──
+  // ── 규칙 엔진 (즉시, AI 무관) ──
+  const pack = useMemo(() => {
+    if (!store || !period || store.transactions.length === 0) return null;
+    return buildMonthlyInsights(store.transactions, store.budgets, period, version, settings);
+  }, [store, period, version, settings]);
+
+  // ── 현재 월의 AI 분석 (캐시 조회) ──
+  const mapKey = period ? analysisMapKey(period, version) : '';
+  const analysis: MonthlyAnalysis | null = (store && mapKey && store.analyses[mapKey]) || null;
+
   const mutate = useCallback((fn: (prev: AppStore) => AppStore) => {
     setStore(prev => (prev ? fn(prev) : prev));
   }, []);
 
+  // ── 월 선택 시 완전 자동 실행 (데이터 지문 기반 캐시로 중복 호출 방지) ──
+  useEffect(() => {
+    if (!store || !period || !pack || store.transactions.length === 0) return;
+    if (!hasGeminiKey()) { setAnalysisStatus('no-key'); return; }
+
+    const cacheKey = analysisCacheKey(store.transactions, period, version);
+    const cached = store.analyses[mapKey];
+    if (isAnalysisValid(cached, cacheKey)) {
+      setAnalysisStatus('done');
+      return;
+    }
+    if (runningKey.current === cacheKey) return; // 이미 실행 중
+
+    runningKey.current = cacheKey;
+    setAnalysisStatus('running');
+    runMonthlyAnalysis(store.transactions, store.budgets, period, version, settings, pack)
+      .then(result => {
+        mutate(prev => ({ ...prev, analyses: { ...prev.analyses, [mapKey]: result } }));
+        setAnalysisStatus(result.error ? 'error' : 'done');
+        if (result.error) toast.error(`AI 분석 실패 — ${result.error}`);
+      })
+      .finally(() => {
+        if (runningKey.current === cacheKey) runningKey.current = null;
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, period, version, pack, mapKey, settings.gemini_model, keyBump]);
+
+  // ── 액션들 ──
   const loadDemo = useCallback(() => {
     const tx = generateDemoTransactions();
     const budgets = generateDemoBudgets();
@@ -96,6 +138,7 @@ const Index = () => {
       transactions: [...prev.transactions.filter(r => r.dataset_id !== 'demo-actual'), ...tx],
       budgets: [...prev.budgets.filter(b => b.dataset_id !== 'demo-budget'), ...budgets],
       datasets: [...prev.datasets.filter(d => !d.id.startsWith('demo-')), ...metas],
+      analyses: {}, // 데이터가 바뀌므로 분석 캐시 초기화
     }));
     setActiveTab('overview');
     toast.success(`가상 데이터 로드 완료 — 실적 ${tx.length.toLocaleString()}건, 예산 ${budgets.length.toLocaleString()}건`);
@@ -121,6 +164,7 @@ const Index = () => {
       transactions: payload.actualRows ? [...prev.transactions, ...payload.actualRows] : prev.transactions,
       budgets: payload.budgetRows ? [...prev.budgets, ...payload.budgetRows] : prev.budgets,
       datasets: [...prev.datasets, meta],
+      analyses: {},
     }));
     setUploadFlow(null);
     setActiveTab(payload.kind === 'actual' ? 'overview' : 'bva');
@@ -137,6 +181,7 @@ const Index = () => {
       transactions: prev.transactions.filter(r => r.dataset_id !== id),
       budgets: prev.budgets.filter(b => b.dataset_id !== id),
       datasets: prev.datasets.filter(d => d.id !== id),
+      analyses: {},
     }));
     toast.success('데이터셋 삭제 완료');
   }, [mutate]);
@@ -150,6 +195,7 @@ const Index = () => {
     setStore({ ...EMPTY_STORE });
     setPeriodState('');
     setVersionState(null);
+    setAnalysisStatus('idle');
     setActiveTab('data');
   }, []);
 
@@ -169,7 +215,7 @@ const Index = () => {
     mutate(prev => ({ ...prev, reportNotes: { ...prev.reportNotes, [p]: note } }));
   }, [mutate]);
 
-  // ── 렌더 분기 ──
+  // ── 렌더 ──
   if (!store) {
     return <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">데이터를 불러오는 중…</div>;
   }
@@ -189,7 +235,6 @@ const Index = () => {
     );
   }
 
-  // 실적 데이터가 없으면 랜딩(업로드) 화면
   if (store.transactions.length === 0) {
     return (
       <FileUpload
@@ -207,7 +252,8 @@ const Index = () => {
       <AppSidebar activeTab={activeTab} onTabChange={setActiveTab} />
       <main className="flex-1 min-w-0">
         {activeTab === 'overview' && hasPeriod && (
-          <MonthlyOverview rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState} version={version} settings={settings} />
+          <MonthlyOverview rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
+            version={version} settings={settings} pack={pack} analysis={analysis} analysisStatus={analysisStatus} />
         )}
         {activeTab === 'bva' && hasPeriod && (
           <BvaView rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
@@ -219,7 +265,8 @@ const Index = () => {
         )}
         {activeTab === 'variance' && hasPeriod && (
           <VarianceView rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
-            version={version} settings={settings} commentary={store.commentary} upsertCommentary={upsertCommentary} />
+            version={version} settings={settings} commentary={store.commentary} upsertCommentary={upsertCommentary}
+            analysis={analysis} analysisStatus={analysisStatus} />
         )}
         {activeTab === 'review' && hasPeriod && (
           <VoucherReview rows={store.transactions} periods={periods} period={period} setPeriod={setPeriodState}
@@ -227,14 +274,15 @@ const Index = () => {
         )}
         {activeTab === 'report' && hasPeriod && (
           <ReportView rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
-            version={version} settings={settings} commentary={store.commentary}
-            reportNote={store.reportNotes[period] ?? ''} setReportNote={setReportNote} />
+            version={version} settings={settings} commentary={store.commentary} reviews={store.reviews}
+            reportNote={store.reportNotes[period] ?? ''} setReportNote={setReportNote}
+            pack={pack} analysis={analysis} analysisStatus={analysisStatus} />
         )}
         {activeTab === 'data' && (
           <DataManager store={store} onStartMapping={startMapping} onLoadDemo={loadDemo}
             onDeleteDataset={deleteDataset} onDeleteProfile={deleteProfile} onResetAll={resetAll} />
         )}
-        {activeTab === 'settings' && <SettingsView settings={settings} setSettings={setSettings} />}
+        {activeTab === 'settings' && <SettingsView settings={settings} setSettings={setSettings} onKeyChanged={() => setKeyBump(k => k + 1)} />}
       </main>
     </div>
   );
