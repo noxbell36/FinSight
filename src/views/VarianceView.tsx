@@ -7,10 +7,12 @@ import type { MappedRow, BudgetRecord, CommentaryEntry, MonthlyAnalysis } from '
 import type { AppSettings } from '@/types/settings';
 import { bvaByAccount, accountChanges } from '@/lib/insights';
 import { findingOf } from '@/lib/aiPipeline';
+import type { MonthlyInsightPack } from '@/lib/insightEngine';
+import { buildLocalDraft } from '@/lib/insightEngine';
 import { fmtWon, fmtPct, fmtChange } from '@/lib/format';
 import { periodLabel } from '@/lib/normalize';
 import { MonthSelect, PageHeader, EmptyHint } from '@/components/shared';
-import type { AnalysisStatus } from '@/components/InsightBriefing';
+import type { AnalysisStatus } from '@/lib/aiPipeline';
 
 interface Props {
   rows: MappedRow[];
@@ -24,6 +26,8 @@ interface Props {
   upsertCommentary: (entry: CommentaryEntry) => void;
   analysis: MonthlyAnalysis | null;
   analysisStatus: AnalysisStatus;
+  cooldownLeft?: number;
+  pack: MonthlyInsightPack | null;
   embedded?: boolean;
 }
 
@@ -38,7 +42,7 @@ interface TargetItem {
   reasons: string[];
 }
 
-export default function VarianceView({ rows, budgets, periods, period, setPeriod, version, settings, commentary, upsertCommentary, analysis, analysisStatus, embedded }: Props) {
+export default function VarianceView({ rows, budgets, periods, period, setPeriod, version, settings, commentary, upsertCommentary, analysis, analysisStatus, cooldownLeft, pack, embedded }: Props) {
   const [edits, setEdits] = useState<Record<string, string>>({}); // 사용자가 손댄 텍스트만 보관
 
   const targets = useMemo<TargetItem[]>(() => {
@@ -83,13 +87,20 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
   const entryOf = (account: string) => commentary.find(c => c.id === `${period}:${account}`);
 
   /** 표시 우선순위: 사용자 수정 중 텍스트 > 저장된 사유 > AI 배치 초안 */
-  const textOf = (item: TargetItem): { text: string; origin: 'edit' | 'saved' | 'ai' | 'empty' } => {
+  const textOf = (item: TargetItem): { text: string; origin: 'edit' | 'saved' | 'ai' | 'local' | 'empty' } => {
     const key = `${period}:${item.account_name}`;
     if (edits[key] !== undefined) return { text: edits[key], origin: 'edit' };
     const entry = entryOf(item.account_name);
     if (entry?.reason) return { text: entry.reason, origin: 'saved' };
     const draft = findingOf(analysis, item.account_name)?.draft;
     if (draft) return { text: draft, origin: 'ai' };
+    if (pack) {
+      const local = buildLocalDraft(pack, item.account_name, {
+        actual: item.actual, budget: item.budget, execRate: item.execRate,
+        momDiff: item.momDiff, momRate: item.momRate,
+      });
+      if (local) return { text: local, origin: 'local' };
+    }
     return { text: '', origin: 'empty' };
   };
 
@@ -105,7 +116,7 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
       mom_amount: item.momDiff,
       reason: trimmed,
       status,
-      source: origin === 'ai' ? 'ai-draft' : 'user',
+      source: origin === 'ai' || origin === 'local' ? 'ai-draft' : 'user',
       updated_at: new Date().toISOString(),
     });
     toast.success(status === 'confirmed' ? `${item.account_name} 사유 확정 (월간 리포트 반영)` : '임시 저장 완료');
@@ -126,7 +137,7 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
         mom_amount: item.momDiff,
         reason: text.trim(),
         status: 'confirmed',
-        source: origin === 'ai' ? 'ai-draft' : 'user',
+        source: origin === 'ai' || origin === 'local' ? 'ai-draft' : 'user',
         updated_at: new Date().toISOString(),
       });
       n++;
@@ -161,9 +172,14 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
           <Loader2 className="h-4 w-4 animate-spin" /> 변동사유 초안을 작성하는 중입니다… 완료되면 아래 입력란에 자동으로 채워집니다.
         </div>
       )}
+      {analysisStatus === 'cooldown' && (
+        <div className="panel p-3 mb-4 text-sm text-muted-foreground">
+          호출 한도 대기 중 — 약 {cooldownLeft ?? 0}초 후 코멘트 작성을 이어갑니다. 아래 초안은 규칙 기반으로 채워져 있습니다.
+        </div>
+      )}
       {analysisStatus === 'no-key' && (
         <div className="panel p-3 mb-4 text-sm text-muted-foreground">
-          환경 설정에서 Gemini API 키를 입력하면 초안이 자동 생성됩니다. 현재는 직접 입력만 가능합니다.
+          환경 설정에서 Gemini API 키를 입력하면 더 정교한 초안이 생성됩니다. 현재는 규칙 기반 초안이 제공됩니다.
         </div>
       )}
 
@@ -184,7 +200,7 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
                   <span className="text-xs text-muted-foreground flex-1 min-w-[180px]">{item.reasons.join(' · ')}</span>
                   {entry?.status === 'confirmed' ? (
                     <span className="text-[11px] px-2 py-0.5 rounded bg-accent text-accent-foreground flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> 확정</span>
-                  ) : origin === 'ai' ? (
+                  ) : origin === 'ai' || origin === 'local' ? (
                     <span className="text-[11px] px-2 py-0.5 rounded bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning-foreground))]">초안 · 검토 전</span>
                   ) : entry ? (
                     <span className="text-[11px] px-2 py-0.5 rounded bg-secondary text-muted-foreground">작성 중</span>
@@ -217,7 +233,7 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
                 />
                 <div className="flex items-center gap-2 mt-2.5">
                   <p className="text-[11px] text-muted-foreground flex-1">
-                    {origin === 'ai' && '자동 작성 초안입니다 — 검토 후 확정하십시오.'}
+                    {(origin === 'ai' || origin === 'local') && (origin === 'local' ? '규칙 기반 1차 초안입니다 — 검토 후 확정하십시오.' : '작성된 초안입니다 — 검토 후 확정하십시오.')}
                     {entry?.source === 'ai-draft' && origin === 'saved' && 'AI 초안 기반으로 저장된 사유입니다.'}
                   </p>
                   <Button variant="outline" size="sm" onClick={() => handleSave(item, 'draft')}>임시 저장</Button>

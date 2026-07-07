@@ -19,6 +19,22 @@ export function hasGeminiKey(): boolean {
   return getGeminiKey().length > 0;
 }
 
+/** ── 429 전역 쿨다운: 한도 초과 시 일정 시간 모든 자동 호출 중단 ── */
+const COOLDOWN_STORAGE = 'finpilot-gemini-cooldown-until';
+const COOLDOWN_SECONDS = 75;
+
+export function setGeminiCooldown(seconds = COOLDOWN_SECONDS) {
+  try { localStorage.setItem(COOLDOWN_STORAGE, String(Date.now() + seconds * 1000)); } catch { /* noop */ }
+}
+
+/** 남은 쿨다운(초). 0이면 호출 가능 */
+export function geminiCooldownRemaining(): number {
+  try {
+    const until = parseInt(localStorage.getItem(COOLDOWN_STORAGE) || '0', 10);
+    return Math.max(0, Math.ceil((until - Date.now()) / 1000));
+  } catch { return 0; }
+}
+
 interface GenOpts {
   system?: string;
   model: string;
@@ -58,7 +74,7 @@ export async function geminiGenerate(prompt: string, opts: GenOpts): Promise<str
       const err = await res.json();
       apiMsg = err?.error?.message || '';
     } catch { /* noop */ }
-    if (res.status === 429) throw new Error(`요청 한도 초과(429). 무료 등급은 분당 호출 제한이 있습니다 — 잠시 후 "다시 시도"를 눌러주세요.${apiMsg ? ` (${apiMsg.slice(0, 120)})` : ''}`);
+    if (res.status === 429) { setGeminiCooldown(); throw new Error(`요청 한도 초과(429). 무료 등급은 분당 호출 제한이 있습니다 — 잠시 후 자동 재시도됩니다.${apiMsg ? ` (${apiMsg.slice(0, 120)})` : ''}`); }
     if (res.status === 404) throw new Error(`모델을 찾을 수 없습니다(404). 환경 설정의 모델명을 확인해주세요.${apiMsg ? ` (${apiMsg.slice(0, 120)})` : ''}`);
     if (res.status === 400 || res.status === 403) throw new Error(`요청 거부(${res.status}) — ${apiMsg ? apiMsg.slice(0, 160) : 'API 키 또는 요청 형식을 확인해주세요.'}`);
     throw new Error(`Gemini API 오류 (HTTP ${res.status})${apiMsg ? ` — ${apiMsg.slice(0, 120)}` : ''}`);

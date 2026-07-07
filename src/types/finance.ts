@@ -99,6 +99,7 @@ export interface MonthlyAnalysis {
   risks: string[];               // 리스크 항목 (금액 근거 포함 문장)
   improvements: string[];        // 개선 제안
   next_points: string[];         // 다음 달 관리 포인트
+  report_note: string;           // 보고용 코멘트 초안 (복사해서 보고자료에 활용)
   error?: string;
 }
 

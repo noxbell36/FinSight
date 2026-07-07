@@ -7,7 +7,7 @@ import { periodLabel } from '@/lib/normalize';
 import { MonthSelect, PageHeader, KpiCard } from '@/components/shared';
 import VarianceView from '@/views/VarianceView';
 import VoucherReview from '@/views/VoucherReview';
-import type { AnalysisStatus } from '@/components/InsightBriefing';
+import type { AnalysisStatus } from '@/lib/aiPipeline';
 
 interface Props {
   rows: MappedRow[];
@@ -24,6 +24,7 @@ interface Props {
   pack: MonthlyInsightPack | null;
   analysis: MonthlyAnalysis | null;
   analysisStatus: AnalysisStatus;
+  cooldownLeft: number;
 }
 
 /** 마감 검토 — "마감 전 처리할 일". 변동사유 확정 + 전표 검토를 한 워크플로로. */

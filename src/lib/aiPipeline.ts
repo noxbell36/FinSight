@@ -4,7 +4,7 @@ import type { MonthlyInsightPack } from '@/lib/insightEngine';
 import { dataFingerprint } from '@/lib/insightEngine';
 import { bvaByAccount, accountChanges, computeKpis } from '@/lib/insights';
 import { geminiJSON } from '@/lib/gemini';
-import { periodLabel, prevPeriod } from '@/lib/normalize';
+import { periodLabel } from '@/lib/normalize';
 import { fmtWon, fmtPct, fmtChange } from '@/lib/format';
 
 /**
@@ -13,6 +13,8 @@ import { fmtWon, fmtPct, fmtChange } from '@/lib/format';
  *        주요 계정 특이사항 / 리스크 / 개선 제안 / 다음 달 관리 포인트.
  * 오류 결과도 캐시되어 자동 재시도 루프를 만들지 않는다 (수동 재시도만).
  */
+
+export type AnalysisStatus = 'idle' | 'running' | 'done' | 'error' | 'no-key' | 'cooldown';
 
 export function analysisMapKey(period: string, version: string | null): string {
   return `${period}|${version ?? ''}`;
@@ -25,44 +27,6 @@ export function analysisCacheKey(rows: MappedRow[], period: string, version: str
 /** 성공/실패 무관 — 같은 데이터로 이미 시도했는지 (자동 재호출 차단) */
 export function isAnalysisAttempted(a: MonthlyAnalysis | undefined | null, cacheKey: string): boolean {
   return !!a && a.key === cacheKey;
-}
-
-/** 계정의 전월비 증감을 견인한 거래처/부서 산출 (AI 근거용) */
-function accountDrivers(rows: MappedRow[], period: string, account: string) {
-  const prev = prevPeriod(period);
-  const vCurr = new Map<string, number>();
-  const vPrev = new Map<string, number>();
-  const cc = new Map<string, number>();
-  const memos = new Set<string>();
-  let txCount = 0;
-  for (const r of rows) {
-    if (r.account_name !== account) continue;
-    const v = r.vendor || '미상';
-    if (r.period === period) {
-      txCount++;
-      vCurr.set(v, (vCurr.get(v) || 0) + (r.curr_amount ?? 0));
-      cc.set(r.cost_center || '미분류', (cc.get(r.cost_center || '미분류') || 0) + (r.curr_amount ?? 0));
-      if (r.memo) memos.add(r.memo);
-    } else if (r.period === prev) {
-      vPrev.set(v, (vPrev.get(v) || 0) + (r.curr_amount ?? 0));
-    }
-  }
-  const vendors = new Set([...vCurr.keys(), ...vPrev.keys()]);
-  const diffSum = Array.from(vendors).reduce((s, v) => s + ((vCurr.get(v) || 0) - (vPrev.get(v) || 0)), 0);
-  let topDriver: { vendor: string; diff: number } | null = null;
-  for (const v of vendors) {
-    const d = (vCurr.get(v) || 0) - (vPrev.get(v) || 0);
-    if (!topDriver || Math.abs(d) > Math.abs(topDriver.diff)) topDriver = { vendor: v, diff: d };
-  }
-  const topCc = Array.from(cc.entries()).sort((a, b) => b[1] - a[1])[0];
-  return {
-    txCount,
-    memos: Array.from(memos).slice(0, 6),
-    top_vendor_driver: topDriver
-      ? { name: topDriver.vendor, diff: Math.round(topDriver.diff), diff_share_pct: diffSum !== 0 ? +((topDriver.diff / diffSum) * 100).toFixed(0) : null }
-      : null,
-    main_cost_center: topCc ? { name: topCc[0], amount: Math.round(topCc[1]) } : null,
-  };
 }
 
 const SYSTEM_PIPELINE = `당신은 기업 재무팀의 관리회계 담당자입니다. 월마감 후 CFO 보고 자료를 작성합니다.
@@ -78,10 +42,13 @@ const SYSTEM_PIPELINE = `당신은 기업 재무팀의 관리회계 담당자입
 - risks: 금액·배수 근거가 들어간 리스크 문장 2~4개.
 - improvements: 실행 가능한 개선 제안 2~3개.
 - next_points: 다음 달 관리 포인트 2~3개 (착지 전망·미확정 사유 후속 확인 포함).
+- report_note: 경영진 보고자료에 그대로 붙여 쓸 수 있는 코멘트 초안 3~5문장. 숫자 근거 포함, 과장 금지, "확인 필요"·"추가 검토 필요" 표현 사용, 재무팀 보고 문체.
+- 표현 금지어: "AI", "스마트", "자동 진단", "완전 자동화", "혁신적". 담백한 재무 보고 문체 유지.
 반드시 JSON만 출력.`;
 
 interface PipelineResponse {
   summary: string;
+  report_note: string;
   findings: AiAccountFinding[];
   highlights: { account_name: string; note: string }[];
   risks: string[];
@@ -108,6 +75,7 @@ export async function runMonthlyAnalysis(
     risks: [],
     improvements: [],
     next_points: [],
+    report_note: '',
   };
 
   try {
@@ -117,10 +85,10 @@ export async function runMonthlyAnalysis(
     const changeMap = new Map(changes.map(c => [c.account_name, c]));
     const bvaMap = new Map(bva.map(r => [r.account_name, r]));
 
-    const targets = pack.flaggedAccounts.slice(0, 12).map(acc => {
+    const targets = pack.flaggedAccounts.slice(0, 10).map(acc => {
       const b = bvaMap.get(acc);
       const c = changeMap.get(acc);
-      const drv = accountDrivers(rows, period, acc);
+      const d = pack.drivers[acc];
       return {
         account: acc,
         actual: Math.round(b?.actual ?? c?.curr ?? 0),
@@ -128,7 +96,9 @@ export async function runMonthlyAnalysis(
         exec_rate_pct: b?.execRate != null ? +(b.execRate * 100).toFixed(1) : null,
         mom_diff: Math.round(c?.diff ?? 0),
         mom_rate_pct: c?.rate != null ? +(c.rate * 100).toFixed(1) : null,
-        ...drv,
+        vendor_drivers: d?.vendorTop.map(v => ({ name: v.name, diff: Math.round(v.diff), share_pct: v.share != null ? Math.round(v.share * 100) : null })) ?? [],
+        main_cc: d?.ccTop ? { name: d.ccTop.name, share_pct: Math.round(d.ccTop.share * 100) } : null,
+        memos: d?.memoTop.map(m => m.memo) ?? [],
       };
     });
 
@@ -138,7 +108,7 @@ export async function runMonthlyAnalysis(
       share_pct: kpi.total > 0 ? +((r.actual / kpi.total) * 100).toFixed(1) : 0,
     }));
 
-    const insightLines = pack.items.slice(0, 14).map(i => `[${i.category}/${i.severity}] ${i.title} — ${i.detail}`);
+    const insightLines = pack.items.slice(0, 10).map(i => `[${i.category}/${i.severity}] ${i.title} — ${i.detail}`);
     const landingLines = pack.landing.filter(l => l.ratio > 1).slice(0, 5).map(l =>
       `${l.account_name}: 연간예산 ${fmtWon(l.annualBudget)} / 착지전망 ${fmtWon(l.projected)} (${fmtPct(l.ratio)})`);
 
@@ -155,23 +125,24 @@ export async function runMonthlyAnalysis(
       '## 상위 5개 계정 (highlights 작성 대상)',
       JSON.stringify(topAccounts),
       '',
-      '## 검토 대상 계정 상세 (findings 작성 대상 — top_vendor_driver.diff_share_pct = 전월비 증감 중 해당 거래처 기여율%)',
+      '## 검토 대상 계정 상세 (findings 작성 대상 — vendor_drivers.share_pct = 전월비 증감 중 해당 거래처 기여율%)',
       JSON.stringify(targets),
       '',
       '## 출력 JSON 스키마',
-      '{"summary":"...","findings":[{"account_name":"","cause":"","action":"","draft":""}],"highlights":[{"account_name":"","note":""}],"risks":["..."],"improvements":["..."],"next_points":["..."]}',
+      '{"summary":"...","report_note":"...","findings":[{"account_name":"","cause":"","action":"","draft":""}],"highlights":[{"account_name":"","note":""}],"risks":["..."],"improvements":["..."],"next_points":["..."]}',
       'findings는 검토 대상 계정 전체, highlights는 상위 5개 계정 전체에 대해 작성.',
     ].filter(Boolean).join('\n');
 
     const res = await geminiJSON<PipelineResponse>(prompt, {
       system: SYSTEM_PIPELINE,
       model: settings.gemini_model,
-      maxTokens: 8192,
+      maxTokens: 4096,
     });
 
     return {
       ...base,
       summary: (res.summary || '').trim(),
+      report_note: (res.report_note || '').trim(),
       findings: Array.isArray(res.findings)
         ? res.findings.filter(f => f && f.account_name).map(f => ({
             account_name: String(f.account_name),

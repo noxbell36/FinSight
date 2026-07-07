@@ -9,13 +9,12 @@ import { DEFAULT_SETTINGS, SETTINGS_STORAGE_KEY } from '@/types/settings';
 import { kvGet, kvSet, kvClearAll } from '@/lib/db';
 import { availablePeriods, budgetVersions } from '@/lib/insights';
 import { buildMonthlyInsights } from '@/lib/insightEngine';
-import { runMonthlyAnalysis, analysisMapKey, analysisCacheKey, isAnalysisAttempted } from '@/lib/aiPipeline';
-import { hasGeminiKey } from '@/lib/gemini';
+import { runMonthlyAnalysis, analysisMapKey, analysisCacheKey, isAnalysisAttempted, type AnalysisStatus } from '@/lib/aiPipeline';
+import { hasGeminiKey, geminiCooldownRemaining } from '@/lib/gemini';
 import { generateDemoTransactions, generateDemoBudgets, demoDatasetMetas } from '@/lib/demoData';
 import FileUpload, { type SheetData } from '@/components/FileUpload';
 import ColumnMapper, { type MappingConfirmPayload } from '@/components/ColumnMapper';
 import AppSidebar from '@/components/AppSidebar';
-import type { AnalysisStatus } from '@/components/InsightBriefing';
 import MonthlyOverview from '@/views/MonthlyOverview';
 import BvaView from '@/views/BvaView';
 import DetailView from '@/views/DetailView';
@@ -41,6 +40,7 @@ const Index = () => {
   const [version, setVersionState] = useState<string | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>('idle');
   const [keyBump, setKeyBump] = useState(0);
+  const [cooldownLeft, setCooldownLeft] = useState(0);
   const loaded = useRef(false);
   const runningKey = useRef<string | null>(null);
 
@@ -123,20 +123,52 @@ const Index = () => {
       setAnalysisStatus(cached!.error ? 'error' : 'done');
       return;
     }
+
+    // 전역 쿨다운 중이면 호출하지 않고 대기 (월을 옮겨도 추가 호출 없음)
+    const cd = geminiCooldownRemaining();
+    if (cd > 0) {
+      setAnalysisStatus('cooldown');
+      setCooldownLeft(cd);
+      return;
+    }
+
     if (runningKey.current === cacheKey) return;
 
     runningKey.current = cacheKey;
     setAnalysisStatus('running');
     runMonthlyAnalysis(store.transactions, store.budgets, period, version, settings, pack)
       .then(result => {
-        mutate(prev => ({ ...prev, analyses: { ...prev.analyses, [mapKey]: result } }));
-        setAnalysisStatus(result.error ? 'error' : 'done');
+        const is429 = !!result.error && result.error.includes('429');
+        if (is429) {
+          // 한도 초과는 캐시하지 않음 → 쿨다운 종료 후 자동 재시도
+          setAnalysisStatus('cooldown');
+          setCooldownLeft(Math.max(geminiCooldownRemaining(), 5));
+        } else {
+          mutate(prev => ({ ...prev, analyses: { ...prev.analyses, [mapKey]: result } }));
+          setAnalysisStatus(result.error ? 'error' : 'done');
+        }
       })
       .finally(() => {
         if (runningKey.current === cacheKey) runningKey.current = null;
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store, period, version, pack, mapKey, settings.gemini_model, keyBump]);
+
+  // 쿨다운 카운트다운 — 0이 되면 자동 재시도
+  useEffect(() => {
+    if (analysisStatus !== 'cooldown') return;
+    const t = setInterval(() => {
+      setCooldownLeft(prev => {
+        if (prev <= 1) {
+          clearInterval(t);
+          setKeyBump(k => k + 1); // 효과 재실행 → 재시도
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [analysisStatus]);
 
   /** 수동 재시도: 해당 월 캐시를 지우면 위 효과가 1회 재실행 */
   const retryAnalysis = useCallback(() => {
@@ -288,7 +320,8 @@ const Index = () => {
         {activeTab === 'overview' && hasPeriod && (
           <MonthlyOverview rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
             version={version} settings={settings} pack={pack} analysis={analysis} analysisStatus={analysisStatus}
-            onRetryAnalysis={retryAnalysis} goToDetail={() => setActiveTab('detail')} />
+            cooldownLeft={cooldownLeft} onRetryAnalysis={retryAnalysis}
+            goToDetail={() => setActiveTab('detail')} goToClosing={() => setActiveTab('closing')} />
         )}
         {activeTab === 'bva' && hasPeriod && (
           <BvaView rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
@@ -300,13 +333,13 @@ const Index = () => {
         {activeTab === 'closing' && hasPeriod && (
           <ClosingView rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
             version={version} settings={settings} commentary={store.commentary} upsertCommentary={upsertCommentary}
-            reviews={store.reviews} setReviewStatus={setReviewStatus} pack={pack} analysis={analysis} analysisStatus={analysisStatus} />
+            reviews={store.reviews} setReviewStatus={setReviewStatus} pack={pack} analysis={analysis} analysisStatus={analysisStatus} cooldownLeft={cooldownLeft} />
         )}
         {activeTab === 'report' && hasPeriod && (
           <ReportView rows={store.transactions} budgets={store.budgets} periods={periods} period={period} setPeriod={setPeriodState}
             version={version} settings={settings} commentary={store.commentary} reviews={store.reviews}
             reportNote={store.reportNotes[period] ?? ''} setReportNote={setReportNote}
-            pack={pack} analysis={analysis} analysisStatus={analysisStatus} onRetryAnalysis={retryAnalysis} />
+            pack={pack} analysis={analysis} analysisStatus={analysisStatus} cooldownLeft={cooldownLeft} onRetryAnalysis={retryAnalysis} />
         )}
         {activeTab === 'data' && (
           <DataManager store={store} onStartMapping={startMapping} onLoadDemo={loadDemo}

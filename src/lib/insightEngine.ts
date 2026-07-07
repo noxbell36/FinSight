@@ -52,7 +52,8 @@ export interface MonthlyInsightPack {
   waterfall: WaterfallStep[];        // 전월비 증감 분해
   accountConcentration: { top3Share: number; names: string[] } | null;
   vendorConcentration: { top5Share: number } | null;
-  flaggedAccounts: string[];         // AI 해석 대상 계정 (변동사유 대상과 동일 기준)
+  flaggedAccounts: string[];         // 해석 대상 계정 (변동사유 대상과 동일 기준)
+  drivers: Record<string, AccountDrivers>; // 계정별 증감 동인 분해 (flaggedAccounts 대상)
 }
 
 const mean = (a: number[]) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
@@ -297,10 +298,15 @@ export function buildMonthlyInsights(
   const sevOrder: Record<InsightSeverity, number> = { danger: 0, warning: 1, info: 2, good: 3 };
   items.sort((a, b) => sevOrder[a.severity] - sevOrder[b.severity]);
 
+  const flaggedList = Array.from(flagged);
+  const drivers: Record<string, AccountDrivers> = {};
+  for (const acc of flaggedList.slice(0, 20)) drivers[acc] = computeDrivers(rows, period, acc);
+
   return {
     period, items, recurrence, fixedShare, landing, waterfall,
     accountConcentration, vendorConcentration,
-    flaggedAccounts: Array.from(flagged),
+    flaggedAccounts: flaggedList,
+    drivers,
   };
 }
 
@@ -315,4 +321,89 @@ export function dataFingerprint(rows: MappedRow[], period: string): string {
     }
   }
   return `${count}-${Math.round(sum)}`;
+}
+
+/** ── 동인(driver) 분해: 계정 증감을 거래처·부서·적요 기준으로 분해 ── */
+export interface AccountDrivers {
+  txCount: number;
+  vendorTop: { name: string; diff: number; share: number | null }[]; // 전월비 증감 기여 상위 3
+  ccTop: { name: string; amount: number; share: number } | null;     // 당월 최대 부서
+  memoTop: { memo: string; amount: number }[];                       // 당월 적요 그룹 상위 3
+}
+
+export function computeDrivers(rows: MappedRow[], period: string, account: string): AccountDrivers {
+  const prev = prevPeriod(period);
+  const vCurr = new Map<string, number>();
+  const vPrev = new Map<string, number>();
+  const cc = new Map<string, number>();
+  const memo = new Map<string, number>();
+  let txCount = 0;
+  let currTotal = 0;
+  for (const r of rows) {
+    if (r.account_name !== account) continue;
+    const v = r.vendor || '미상';
+    if (r.period === period) {
+      txCount++;
+      currTotal += r.curr_amount ?? 0;
+      vCurr.set(v, (vCurr.get(v) || 0) + (r.curr_amount ?? 0));
+      cc.set(r.cost_center || '미분류', (cc.get(r.cost_center || '미분류') || 0) + (r.curr_amount ?? 0));
+      if (r.memo) memo.set(r.memo, (memo.get(r.memo) || 0) + (r.curr_amount ?? 0));
+    } else if (r.period === prev) {
+      vPrev.set(v, (vPrev.get(v) || 0) + (r.curr_amount ?? 0));
+    }
+  }
+  const vendors = new Set([...vCurr.keys(), ...vPrev.keys()]);
+  const diffs = Array.from(vendors).map(v => ({ name: v, diff: (vCurr.get(v) || 0) - (vPrev.get(v) || 0) }));
+  const diffSum = diffs.reduce((s, d) => s + d.diff, 0);
+  const vendorTop = diffs
+    .filter(d => d.diff !== 0)
+    .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff))
+    .slice(0, 3)
+    .map(d => ({ ...d, share: diffSum !== 0 ? d.diff / diffSum : null }));
+  const ccArr = Array.from(cc.entries()).sort((a, b) => b[1] - a[1]);
+  return {
+    txCount,
+    vendorTop,
+    ccTop: ccArr.length ? { name: ccArr[0][0], amount: ccArr[0][1], share: currTotal > 0 ? ccArr[0][1] / currTotal : 0 } : null,
+    memoTop: Array.from(memo.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([m, amount]) => ({ memo: m, amount })),
+  };
+}
+
+/** 계정의 변동 성격 문구 (규칙 엔진 판정 재사용) */
+export function natureOf(pack: MonthlyInsightPack, account: string): string | null {
+  const item = pack.items.find(i => i.account === account && (i.id.startsWith('trend-') || i.id.startsWith('oneoff-') || i.id.startsWith('seasonal-') || i.id.startsWith('step-')));
+  if (!item) return null;
+  if (item.id.startsWith('trend-')) return '3개월 연속 같은 방향 — 추세성 변동으로 추정';
+  if (item.id.startsWith('seasonal-')) return '전년 동월에도 유사 변동 — 계절성으로 추정';
+  if (item.id.startsWith('step-')) return '지출 수준 자체 변경 — 계약·구조 변화 확인 필요';
+  return '과거 패턴에 없는 단발성 변동 — 일회성 여부 확인 필요';
+}
+
+/**
+ * 규칙 기반 변동사유 초안 — AI 호출 실패·미설정 시에도 항상 채워지는 1차 초안.
+ * 근거: 전월비, 예산 차이, 거래처 기여도, 대표 적요, 성격 판정.
+ */
+export function buildLocalDraft(
+  pack: MonthlyInsightPack,
+  account: string,
+  ctx: { actual: number; budget: number | null; execRate: number | null; momDiff: number; momRate: number | null },
+): string {
+  const d = pack.drivers[account];
+  const parts: string[] = [];
+  const dir = ctx.momDiff >= 0 ? '증가' : '감소';
+  parts.push(`당월 ${fmtWon(ctx.actual)}원으로 전월비 ${ctx.momDiff >= 0 ? '+' : '△'}${fmtWon(Math.abs(ctx.momDiff))}원${ctx.momRate != null ? `(${fmtChange(ctx.momRate)})` : ''} ${dir}.`);
+  if (ctx.budget != null && ctx.execRate != null && ctx.execRate > 1) {
+    parts.push(`예산 ${fmtWon(ctx.budget)}원 대비 ${fmtWon(ctx.actual - ctx.budget)}원 초과(집행률 ${fmtPct(ctx.execRate)}).`);
+  }
+  const v = d?.vendorTop[0];
+  if (v && v.share != null && Math.abs(v.share) >= 0.3) {
+    const memoHint = d.memoTop[0] ? `, 주요 적요 '${d.memoTop[0].memo}'` : '';
+    parts.push(`${dir}분의 약 ${Math.round(Math.abs(v.share) * 100)}%가 '${v.name}' 거래에서 발생${memoHint}.`);
+  } else if (d?.memoTop[0]) {
+    parts.push(`주요 적요: '${d.memoTop[0].memo}'.`);
+  }
+  const nature = natureOf(pack, account);
+  if (nature) parts.push(`${nature}.`);
+  parts.push('상세 사유 확인 필요.');
+  return parts.join(' ');
 }
