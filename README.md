@@ -1,73 +1,81 @@
-# Welcome to your Lovable project
+# FinPilot — 비용·예산 대비 실적 분석 도구
 
-## Project info
+> 재무팀 월마감 비용 검토 업무(법인카드·개인경비 검토, 전표 처리, 월별 비용 증감 분석)를
+> 실무 절차 그대로 도구화한 **검토 보조 대시보드**입니다.
+> 데이터가 1차 검토(비교·선별·귀속·검출·초안)를 준비하고, 사람은 판단과 확정에 집중합니다.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+**🔗 라이브 데모**: https://fin-sight-iota-ebon.vercel.app
+(접속 후 "가상 데이터로 시작하기" 클릭 — 18개월 치 전표와 예산 2개 버전이 로드됩니다)
 
-## How can I edit this code?
+![월간 현황](docs/images/overview.png)
 
-There are several ways of editing your application.
+---
 
-**Use Lovable**
+## 왜 만들었나
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+재무팀에서 월마감 때마다 반복한 업무의 시간 배분을 돌아보면, **판단하는 시간보다 판단할 대상을 찾는 시간이 길었습니다.** 전월 파일과 나란히 놓고 튀는 숫자를 찾고, 그 계정의 전표를 필터로 뒤져 거래처·적요를 확인하는 반복이었습니다. FinPilot은 이 반복 구간을 자동화합니다:
 
-Changes made via Lovable will be committed automatically to this repo.
+- **비교** — 전월비·전년동월비·YTD·예산 대비를 자동 계산
+- **선별** — 증감률 임계치·신규 발생·집행률 경보 기준으로 검토 대상 자동 선정
+- **귀속** — 계정 증감을 거래처 기여도로 분해 (예: *"증가분의 72%가 PG사 결제대행 수수료"*)
+- **검출** — 실무 경비 검토를 옮긴 7종 규칙 (VAT 불일치·중복 결제 의심·분할 결제·적요 미기재·증빙 누락·건당 고액·주말 전표)
+- **초안** — 변동사유·보고 코멘트를 자동 작성 (사람이 검토·수정·확정)
 
-**Use your preferred IDE**
+원인을 **확정하지 않는 것**이 설계 원칙입니다. 모든 자동 생성 문장은 "사유 후보 / 확인 포인트 / 초안 · 검토 후 사용"으로 표시되며, 확정 권한은 사람에게 있습니다.
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+## 주요 화면
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+| 탭 | 답하는 질문 | 핵심 기능 |
+|---|---|---|
+| 월간 현황 | 이번 달 뭐가 문제인가 | 요약 카드 4그룹 · 12개월 실적 vs 예산 · 전월비 워터폴 · 검토 포인트 블록 |
+| 예산 대비 실적 | 어디서 초과/미달인가 | 계정별 차이·집행률 · 연말 착지 전망(속도 기준 조기 경보) |
+| 상세 분석 | 원인이 어디에 있나 | 계정/부서/거래처 드릴다운 · 3개월 이동평균 추이 · 신규 거래처 |
+| 마감 검토 | 마감 전 처리할 일 | 변동사유 초안 자동 채움→확정 워크플로 · 전표 검토 7종 처리 |
+| 월간 리포트 | 보고할 결과물 | 6섹션 보고 초안 (요약→변동 요인→예산 차이→확인 필요→관리 제안→보고 코멘트) · PDF 인쇄 |
 
-Follow these steps:
+![월간 리포트](docs/images/report.png)
+
+## 분석 로직 (요약)
+
+- **변동 성격 판정**: 3개월 이동평균 대비 이탈 + 방향 지속성 + 전년 동월 패턴으로 *추세성 / 계절성 / 일회성 의심 / 계단식 수준 변화*를 구분
+- **비용 성격 분류**: 발생 빈도와 월별 변동계수(CV)로 *고정성 / 준변동 / 변동성 / 간헐·일회성* 분류
+- **착지 전망**: YTD 실적 + 최근 3개월 평균 × 잔여월 (단순 외삽 — 화면에 한계 명시)
+- **동인 분해**: 계정별 전월비 증감을 거래처 기여도 Top3 · 주요 부서 · 대표 적요로 분해
+
+## AI 활용 구조
+
+계산·판정은 **규칙 엔진**이, 문장화는 **Gemini**(선택)가, 확정은 **사람**이 담당합니다.
+
+- 앱이 먼저 집계·기여도를 계산 → 구조화된 요약만 Gemini에 전달 (원본 전표 미전송)
+- 프롬프트에 *데이터 외 창작 금지·원인 단정 금지·수치 변형 금지* 명시
+- **AI 없이도 완결**: 키 미설정·호출 실패 시 규칙 기반 초안으로 모든 화면 동작
+- API 키는 사용자가 직접 입력, 브라우저(localStorage)에만 저장
+
+## 데이터 처리
+
+서버가 없습니다. 업로드한 데이터는 **브라우저(IndexedDB)에만 저장**되며 외부로 전송되지 않습니다 (Gemini 사용 시 집계 요약만 전달). 어떤 엑셀 양식이든 컬럼 매핑으로 연결하고, 양식은 프로파일로 저장되어 다음 달부터 자동 인식됩니다.
+
+## 문서 (포트폴리오·면접용)
+
+재무/회계 실무 관점의 상세 문서는 [`docs/`](./docs)에 있습니다 — [기획 의도](./docs/business-overview.md) · [분석 로직](./docs/finance-analysis-logic.md) · [설계 결정 13가지](./docs/design-rationale.md) · [리포트 해석 가이드](./docs/monthly-report-guide.md) · [AI 활용과 한계](./docs/gemini-finance-usage.md) · [실무자 Q&A](./docs/interview-practitioner-qa.md) · [3분 데모 스크립트](./docs/demo-scenario-guide.md)
+
+## 경험 기반 vs 확장 설계 (정직성 원칙)
+
+- **직접 경험 기반**: 월별 증감 분석, 경비 검토 7종, 변동사유 확정 워크플로, 월간 보고 초안
+- **확장 설계** (학습 후 구현): 예산 대비 대사·집행률, 착지 전망, 고정/변동 분류
+- **의도적 범위 밖**: 예산 편성, Forecast, 매출/원가 시뮬레이션 — 실무 경험이 없는 영역은 흉내 내지 않고 향후 과제로 명시
+
+## 기술 스택
+
+React + TypeScript + Vite · Tailwind CSS + shadcn/ui · Recharts · IndexedDB · SheetJS(xlsx) · Google Gemini API (선택)
+
+## 로컬 실행
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+---
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
-
-**Use GitHub Codespaces**
-
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
-
-## What technologies are used for this project?
-
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+*본 저장소의 가상 데이터는 시연용으로 생성된 것이며 실제 기업 데이터가 아닙니다.*
