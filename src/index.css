@@ -174,4 +174,6 @@
   }
   .no-print { display: none !important; }
   .report-section { break-inside: avoid; }
+  .report-grid { display: block !important; }
+  .report-grid > * { margin-bottom: 16px; }
 }

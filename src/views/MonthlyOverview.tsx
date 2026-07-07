@@ -1,13 +1,12 @@
-import { useMemo, useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { useMemo } from 'react';
 import type { MappedRow, BudgetRecord, MonthlyAnalysis } from '@/types/finance';
 import type { AppSettings } from '@/types/settings';
 import type { MonthlyInsightPack } from '@/lib/insightEngine';
-import { computeKpis, accountChanges, byAccount, byCostCenter, monthlyTotals, totalOf } from '@/lib/insights';
+import { computeKpis, monthlyTotals, totalOf } from '@/lib/insights';
 import { fmtWon, fmtCompact, fmtPct, fmtChange } from '@/lib/format';
 import { periodLabel, prevPeriod } from '@/lib/normalize';
 import { MonthSelect, KpiCard, PageHeader } from '@/components/shared';
-import { WaterfallChart, CompositionDonut } from '@/components/charts';
+import { WaterfallChart } from '@/components/charts';
 import InsightBriefing, { type AnalysisStatus } from '@/components/InsightBriefing';
 
 interface Props {
@@ -21,56 +20,39 @@ interface Props {
   pack: MonthlyInsightPack | null;
   analysis: MonthlyAnalysis | null;
   analysisStatus: AnalysisStatus;
+  onRetryAnalysis: () => void;
+  goToDetail: () => void;
 }
 
-export default function MonthlyOverview({ rows, budgets, periods, period, setPeriod, version, settings, pack, analysis, analysisStatus }: Props) {
+/**
+ * 월간 현황 — "이번 달 뭐가 문제인가"에만 답한다.
+ * 판단(요약·이슈) → 근거(KPI·워터폴)까지. 원자료·추이·구성은 상세 분석 탭으로.
+ */
+export default function MonthlyOverview({ rows, budgets, periods, period, setPeriod, version, settings, pack, analysis, analysisStatus, onRetryAnalysis, goToDetail }: Props) {
   const kpi = useMemo(() => computeKpis(rows, budgets, period, version), [rows, budgets, period, version]);
-  const changes = useMemo(() => accountChanges(rows, period), [rows, period]);
-  const [ccFilter, setCcFilter] = useState('all');
-
-  const totalSeries = useMemo(() => monthlyTotals(rows).filter(d => d.period <= period).slice(-12), [rows, period]);
-  const sparkTotals = totalSeries.map(d => d.amount);
-
-  const accountTable = useMemo(() => {
-    const filtered = ccFilter === 'all' ? rows : rows.filter(r => (r.cost_center || '미분류') === ccFilter);
-    const curr = byAccount(filtered, period);
-    const prev = byAccount(filtered, prevPeriod(period));
-    const total = Array.from(curr.values()).reduce((a, b) => a + b, 0);
-    return Array.from(curr.entries())
-      .map(([name, amount]) => ({
-        name, amount,
-        share: total > 0 ? amount / total : 0,
-        prev: prev.get(name) || 0,
-        diff: amount - (prev.get(name) || 0),
-      }))
-      .sort((a, b) => b.amount - a.amount);
-  }, [rows, period, ccFilter]);
-
-  const ccData = useMemo(() =>
-    Array.from(byCostCenter(rows, period).entries())
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value),
-  [rows, period]);
-
-  const trend = useMemo(() => totalSeries.map(d => ({ ...d, label: d.period.slice(2).replace('-', '.') })), [totalSeries]);
-  const ccList = useMemo(() => Array.from(new Set(rows.map(r => r.cost_center || '미분류'))).sort(), [rows]);
+  const sparkTotals = useMemo(
+    () => monthlyTotals(rows).filter(d => d.period <= period).slice(-12).map(d => d.amount),
+    [rows, period],
+  );
 
   const prevP = prevPeriod(period);
   const hasPrev = periods.includes(prevP);
   const prevTotal = hasPrev ? totalOf(rows, prevP) : 0;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 max-w-6xl mx-auto">
       <PageHeader
-        title="월별 비용 현황"
+        title="월간 현황"
         desc={`${periodLabel(period)} 마감 기준 · 판관비 집계`}
         right={<MonthSelect periods={periods} value={period} onChange={setPeriod} />}
       />
 
-      {/* AI 브리핑 + 인사이트 카드 — 상시 노출 */}
-      {pack && <InsightBriefing items={pack.items} analysis={analysis} status={analysisStatus} />}
+      {/* 판단: 요약 + 확인 필요 항목 */}
+      {pack && (
+        <InsightBriefing items={pack.items} analysis={analysis} status={analysisStatus} onRetry={onRetryAnalysis} />
+      )}
 
-      {/* KPI */}
+      {/* 근거: KPI */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
         <KpiCard label="당월 총비용" value={fmtCompact(kpi.total)} sub={`${fmtWon(kpi.total)}원`} spark={sparkTotals} />
         <KpiCard
@@ -93,82 +75,26 @@ export default function MonthlyOverview({ rows, budgets, periods, period, setPer
         />
       </div>
 
-      {/* 워터폴 + 부서 도넛 */}
-      <div className="grid lg:grid-cols-3 gap-4 mb-5">
-        <div className="panel p-4 lg:col-span-2">
-          <h2 className="text-sm font-semibold mb-1">전월비 증감 분해 (워터폴)</h2>
-          <p className="text-xs text-muted-foreground mb-2">어느 계정이 총비용을 밀어올리고 끌어내렸는지 — 붉은색 증가 / 파란색 감소</p>
-          {pack && hasPrev ? (
-            <WaterfallChart
-              prevTotal={prevTotal}
-              currTotal={kpi.total}
-              steps={pack.waterfall}
-              prevLabel={prevP.slice(2).replace('-', '.')}
-              currLabel={period.slice(2).replace('-', '.')}
-            />
-          ) : (
-            <p className="text-xs text-muted-foreground py-8 text-center">전월 데이터가 있어야 표시됩니다.</p>
-          )}
+      {/* 근거: 전월비 증감 분해 */}
+      <div className="panel p-4">
+        <div className="flex items-baseline justify-between mb-1">
+          <h2 className="text-sm font-semibold">전월비 증감 분해</h2>
+          <button onClick={goToDetail} className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2">
+            계정·부서·거래처 상세 →
+          </button>
         </div>
-        <div className="panel p-4">
-          <h2 className="text-sm font-semibold mb-2">부서별 구성 ({periodLabel(period)})</h2>
-          <CompositionDonut data={ccData} />
-        </div>
-      </div>
-
-      {/* 12개월 추이 */}
-      <div className="panel p-4 mb-5">
-        <h2 className="text-sm font-semibold mb-3">월별 총비용 추이 (최근 12개월)</h2>
-        <ResponsiveContainer width="100%" height={200}>
-          <BarChart data={trend} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 13% 90%)" vertical={false} />
-            <XAxis dataKey="label" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-            <YAxis tickFormatter={(v) => fmtCompact(v)} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={52} />
-            <Tooltip formatter={(v: number) => [`${fmtWon(v)}원`, '총비용']} labelStyle={{ fontSize: 12 }} contentStyle={{ fontSize: 12 }} />
-            <Bar dataKey="amount" radius={[3, 3, 0, 0]} fill="hsl(152 60% 34%)" />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* 계정별 상세 — 상시 전체 노출 */}
-      <div className="panel overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <h2 className="text-sm font-semibold">계정별 상세 ({periodLabel(period)})</h2>
-          <select className="h-8 rounded-md border border-input bg-background px-2 text-sm" value={ccFilter} onChange={e => setCcFilter(e.target.value)}>
-            <option value="all">전체 부서</option>
-            {ccList.map(cc => <option key={cc} value={cc}>{cc}</option>)}
-          </select>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-secondary">
-              <tr className="text-xs text-muted-foreground">
-                <th className="px-4 py-2 text-left font-medium">계정명</th>
-                <th className="px-4 py-2 text-right font-medium">당월 금액</th>
-                <th className="px-4 py-2 text-right font-medium">비중</th>
-                <th className="px-4 py-2 text-right font-medium">전월</th>
-                <th className="px-4 py-2 text-right font-medium">증감액</th>
-                <th className="px-4 py-2 text-right font-medium">증감률</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accountTable.map(a => (
-                <tr key={a.name} className="border-t border-border hover:bg-muted/40">
-                  <td className="px-4 py-2">{a.name}</td>
-                  <td className="px-4 py-2 text-right num">{fmtWon(a.amount)}</td>
-                  <td className="px-4 py-2 text-right num text-muted-foreground">{fmtPct(a.share)}</td>
-                  <td className="px-4 py-2 text-right num text-muted-foreground">{fmtWon(a.prev)}</td>
-                  <td className={`px-4 py-2 text-right num ${a.diff > 0 ? 'text-destructive' : ''}`}>
-                    {a.diff >= 0 ? `+${fmtWon(a.diff)}` : `(${fmtWon(Math.abs(a.diff))})`}
-                  </td>
-                  <td className="px-4 py-2 text-right num text-muted-foreground">
-                    {a.prev !== 0 ? fmtChange(a.diff / a.prev) : a.amount > 0 ? '신규' : '-'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <p className="text-xs text-muted-foreground mb-2">어느 계정이 총비용을 움직였는지 — 붉은색 증가 / 파란색 감소</p>
+        {pack && hasPrev ? (
+          <WaterfallChart
+            prevTotal={prevTotal}
+            currTotal={kpi.total}
+            steps={pack.waterfall}
+            prevLabel={prevP.slice(2).replace('-', '.')}
+            currLabel={period.slice(2).replace('-', '.')}
+          />
+        ) : (
+          <p className="text-xs text-muted-foreground py-8 text-center">전월 데이터가 있어야 표시됩니다.</p>
+        )}
       </div>
     </div>
   );

@@ -16,6 +16,7 @@ interface Props {
   settings: AppSettings;
   reviews: Record<string, 'done' | 'flagged'>;
   setReviewStatus: (key: string, status: 'done' | 'flagged' | null) => void;
+  embedded?: boolean;
 }
 
 const sevIcon = {
@@ -24,7 +25,7 @@ const sevIcon = {
   info: <Info className="h-4 w-4 text-muted-foreground" />,
 };
 
-export default function VoucherReview({ rows, periods, period, setPeriod, settings, reviews, setReviewStatus }: Props) {
+export default function VoucherReview({ rows, periods, period, setPeriod, settings, reviews, setReviewStatus, embedded }: Props) {
   const checks = useMemo(() => runReviewChecks(rows, period, settings), [rows, period, settings]);
 
   // 기본값: 검출이 있는 검사는 전부 펼침 (월 변경 시 재계산)
@@ -54,14 +55,16 @@ export default function VoucherReview({ rows, periods, period, setPeriod, settin
   const flaggedCount = checks.reduce((s, c) => s + c.hits.filter(h => reviews[reviewKey(c.id, h.row)] === 'flagged').length, 0);
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <PageHeader
-        title="전표 · 경비 검토"
-        desc={`${periodLabel(period)} 마감 전 점검 — 법인카드·개인경비·전표 이상 항목`}
-        right={<MonthSelect periods={periods} value={period} onChange={setPeriod} />}
-      />
+    <div className={embedded ? '' : 'p-6 max-w-7xl mx-auto'}>
+      {!embedded && (
+        <PageHeader
+          title="전표 · 경비 검토"
+          desc={`${periodLabel(period)} 마감 전 점검 — 법인카드·개인경비·전표 이상 항목`}
+          right={<MonthSelect periods={periods} value={period} onChange={setPeriod} />}
+        />
+      )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      <div className={embedded ? 'hidden' : 'grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4'}>
         <KpiCard label="검출 항목" value={`${totalHits}건`} sub={`검사 규칙 ${checks.length}종`} />
         <KpiCard label="검토 완료" value={`${doneCount}건`} subClass="text-primary" sub={totalHits > 0 ? `${Math.round((doneCount / totalHits) * 100)}% 처리` : undefined} />
         <KpiCard label="소명 필요" value={`${flaggedCount}건`} subClass={flaggedCount > 0 ? 'text-destructive' : undefined} sub="담당 부서 확인 요청" />

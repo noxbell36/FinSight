@@ -1,6 +1,5 @@
 import {
-  LayoutDashboard, Scale, MessageSquareText, ClipboardCheck, Building2,
-  TrendingUp, FileText, Database, Settings,
+  LayoutDashboard, Scale, SearchCheck, ClipboardCheck, FileText, Database, Settings,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -13,17 +12,15 @@ const navGroups = [
   {
     label: '분석',
     items: [
-      { id: 'overview', label: '월별 비용 현황', icon: LayoutDashboard },
+      { id: 'overview', label: '월간 현황', icon: LayoutDashboard },
       { id: 'bva', label: '예산 대비 실적', icon: Scale },
-      { id: 'trend', label: '추이 분석', icon: TrendingUp },
-      { id: 'vendor', label: '거래처 분석', icon: Building2 },
+      { id: 'detail', label: '상세 분석', icon: SearchCheck },
     ],
   },
   {
-    label: '마감 검토',
+    label: '마감',
     items: [
-      { id: 'variance', label: '차이분석·변동사유', icon: MessageSquareText },
-      { id: 'review', label: '전표·경비 검토', icon: ClipboardCheck },
+      { id: 'closing', label: '마감 검토', icon: ClipboardCheck },
       { id: 'report', label: '월간 리포트', icon: FileText },
     ],
   },

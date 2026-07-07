@@ -80,8 +80,21 @@ export default function SettingsView({ settings, setSettings, onKeyChanged }: Pr
         </div>
         <div className="mt-4">
           <label className="text-xs text-muted-foreground block mb-1">모델</label>
-          <Input value={settings.gemini_model} onChange={e => update('gemini_model', e.target.value)} className="max-w-xs font-mono text-sm" />
-          <p className="text-[11px] text-muted-foreground mt-1">기본값 gemini-2.5-flash. 사용 가능한 다른 모델명으로 변경할 수 있습니다.</p>
+          <div className="flex gap-2 items-center flex-wrap">
+            <select
+              className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              value={['gemini-2.5-flash', 'gemini-2.5-pro'].includes(settings.gemini_model) ? settings.gemini_model : 'custom'}
+              onChange={e => { if (e.target.value !== 'custom') update('gemini_model', e.target.value); }}
+            >
+              <option value="gemini-2.5-flash">gemini-2.5-flash (권장·빠름)</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro (정밀·느림)</option>
+              <option value="custom">직접 입력</option>
+            </select>
+            {!['gemini-2.5-flash', 'gemini-2.5-pro'].includes(settings.gemini_model) && (
+              <Input value={settings.gemini_model} onChange={e => update('gemini_model', e.target.value)} className="max-w-[220px] font-mono text-sm" placeholder="모델명 직접 입력" />
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-1">무료 등급은 분당 호출 한도가 있어, 한도 초과(429) 시 잠시 후 "다시 시도"를 눌러주세요.</p>
         </div>
       </div>
 

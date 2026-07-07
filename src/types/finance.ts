@@ -84,8 +84,8 @@ export type MatchConfidence = 'high' | 'medium' | 'none';
 /** 월간 AI 분석 결과 (캐시) — 규칙 엔진 검출 항목에 대한 AI 해석 */
 export interface AiAccountFinding {
   account_name: string;
-  cause: string;   // 원인 추론 (데이터 근거)
-  action: string;  // 권고 액션
+  cause: string;   // 사유 후보 (데이터 근거)
+  action: string;  // 확인 포인트
   draft: string;   // 변동사유 보고 초안
 }
 
@@ -93,8 +93,12 @@ export interface MonthlyAnalysis {
   key: string;          // `${period}|${version}|${fingerprint}`
   period: string;
   generated_at: string;
-  summary: string;               // Executive Summary (4~6문장)
+  summary: string;               // 종합 코멘트 (4~6문장)
   findings: AiAccountFinding[];  // 검토 대상 계정별 해석
+  highlights: { account_name: string; note: string }[]; // 주요 계정 특이사항 (표용, 짧게)
+  risks: string[];               // 리스크 항목 (금액 근거 포함 문장)
+  improvements: string[];        // 개선 제안
+  next_points: string[];         // 다음 달 관리 포인트
   error?: string;
 }
 

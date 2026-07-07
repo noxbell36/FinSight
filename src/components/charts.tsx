@@ -116,3 +116,30 @@ export function DailyExpenseArea({ data, height = 160 }: { data: { date: string;
     </ResponsiveContainer>
   );
 }
+
+/** 집행률 게이지 (반원) */
+export function RateGauge({ ratio, label = '예산 집행률' }: { ratio: number | null; label?: string }) {
+  const pct = ratio != null ? ratio * 100 : null;
+  const clamped = Math.max(0, Math.min(ratio ?? 0, 1.4)) / 1.4; // 140%를 풀스케일로
+  const angle = Math.PI * (1 - clamped);
+  const r = 42, cx = 50, cy = 50;
+  const x = cx + r * Math.cos(angle);
+  const y = cy - r * Math.sin(angle);
+  const large = clamped > 0.5 ? 1 : 0;
+  const color = ratio == null ? 'hsl(220 9% 70%)' : ratio > 1 ? 'hsl(0 72% 45%)' : ratio > 0.9 ? 'hsl(38 80% 45%)' : 'hsl(152 60% 34%)';
+  return (
+    <div className="flex items-center gap-4">
+      <svg viewBox="0 0 100 56" className="w-28 shrink-0" aria-hidden>
+        <path d={`M 8 50 A 42 42 0 0 1 92 50`} fill="none" stroke="hsl(220 13% 90%)" strokeWidth="8" strokeLinecap="round" />
+        {ratio != null && ratio > 0 && (
+          <path d={`M 8 50 A 42 42 0 ${large} 1 ${x.toFixed(1)} ${y.toFixed(1)}`} fill="none" stroke={color} strokeWidth="8" strokeLinecap="round" />
+        )}
+      </svg>
+      <div>
+        <p className="text-xs text-muted-foreground">{label}</p>
+        <p className="text-2xl font-bold num" style={{ color }}>{pct != null ? `${pct.toFixed(1)}%` : '-'}</p>
+        {ratio != null && ratio > 1 && <p className="text-[11px] text-destructive">예산 초과</p>}
+      </div>
+    </div>
+  );
+}

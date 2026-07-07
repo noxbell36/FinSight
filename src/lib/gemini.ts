@@ -1,7 +1,6 @@
 /**
  * Google Gemini API 직접 호출 (서버 없음).
  * API 키는 사용자가 환경 설정에서 직접 입력하며 localStorage에만 저장된다.
- * 키는 코드·저장소에 절대 포함하지 않는다.
  */
 const KEY_STORAGE = 'finpilot-gemini-key';
 
@@ -20,14 +19,29 @@ export function hasGeminiKey(): boolean {
   return getGeminiKey().length > 0;
 }
 
-export async function geminiGenerate(prompt: string, opts: { system?: string; model: string; maxTokens?: number }): Promise<string> {
+interface GenOpts {
+  system?: string;
+  model: string;
+  maxTokens?: number;
+  json?: boolean; // responseMimeType: application/json
+}
+
+export async function geminiGenerate(prompt: string, opts: GenOpts): Promise<string> {
   const key = getGeminiKey();
   if (!key) throw new Error('Gemini API 키가 설정되지 않았습니다. 환경 설정에서 입력해주세요.');
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${opts.model}:generateContent?key=${encodeURIComponent(key)}`;
+  const generationConfig: Record<string, unknown> = {
+    temperature: 0.3,
+    maxOutputTokens: opts.maxTokens ?? 2048,
+    // 2.5 계열의 내부 추론(thinking)이 출력 토큰을 소진해 응답이 잘리는 문제 방지
+    thinkingConfig: { thinkingBudget: 0 },
+  };
+  if (opts.json) generationConfig.responseMimeType = 'application/json';
+
   const body: Record<string, unknown> = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: opts.maxTokens ?? 1024 },
+    generationConfig,
   };
   if (opts.system) body.systemInstruction = { parts: [{ text: opts.system }] };
 
@@ -38,34 +52,40 @@ export async function geminiGenerate(prompt: string, opts: { system?: string; mo
   });
 
   if (!res.ok) {
-    if (res.status === 400 || res.status === 403) throw new Error('API 키가 유효하지 않습니다. 키를 확인해주세요.');
-    if (res.status === 429) throw new Error('요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.');
-    throw new Error(`Gemini API 오류 (HTTP ${res.status})`);
+    // 실제 원인 메시지를 그대로 노출 (키/모델/한도 구분 가능하게)
+    let apiMsg = '';
+    try {
+      const err = await res.json();
+      apiMsg = err?.error?.message || '';
+    } catch { /* noop */ }
+    if (res.status === 429) throw new Error(`요청 한도 초과(429). 무료 등급은 분당 호출 제한이 있습니다 — 잠시 후 "다시 시도"를 눌러주세요.${apiMsg ? ` (${apiMsg.slice(0, 120)})` : ''}`);
+    if (res.status === 404) throw new Error(`모델을 찾을 수 없습니다(404). 환경 설정의 모델명을 확인해주세요.${apiMsg ? ` (${apiMsg.slice(0, 120)})` : ''}`);
+    if (res.status === 400 || res.status === 403) throw new Error(`요청 거부(${res.status}) — ${apiMsg ? apiMsg.slice(0, 160) : 'API 키 또는 요청 형식을 확인해주세요.'}`);
+    throw new Error(`Gemini API 오류 (HTTP ${res.status})${apiMsg ? ` — ${apiMsg.slice(0, 120)}` : ''}`);
   }
 
   const data = await res.json();
+  const finish = data?.candidates?.[0]?.finishReason;
   const text: string = data?.candidates?.[0]?.content?.parts
     ?.map((p: { text?: string }) => p.text || '')
     .join('') || '';
-  if (!text) throw new Error('AI 응답이 비어 있습니다.');
+  if (!text) {
+    if (finish === 'MAX_TOKENS') throw new Error('응답이 토큰 한도로 잘렸습니다. 다시 시도해주세요.');
+    if (finish === 'SAFETY') throw new Error('안전 필터로 응답이 차단되었습니다.');
+    throw new Error('AI 응답이 비어 있습니다. 다시 시도해주세요.');
+  }
   return text.trim();
 }
 
-/** JSON 응답 전용 (매핑 제안 등) */
-export async function geminiJSON<T>(prompt: string, opts: { system?: string; model: string; maxTokens?: number }): Promise<T> {
-  const raw = await geminiGenerate(prompt + '\n\n반드시 JSON만 출력하십시오. 마크다운 코드펜스·설명 금지.', opts);
-  const cleaned = raw.replace(/^```(?:json)?/m, '').replace(/```$/m, '').trim();
-  return JSON.parse(cleaned) as T;
+/** JSON 응답 전용 — 코드펜스/서두 텍스트가 섞여도 첫 { ~ 마지막 } 만 추출해 파싱 */
+export async function geminiJSON<T>(prompt: string, opts: Omit<GenOpts, 'json'>): Promise<T> {
+  const raw = await geminiGenerate(prompt, { ...opts, json: true });
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) throw new Error('AI 응답에서 JSON을 찾지 못했습니다. 다시 시도해주세요.');
+  try {
+    return JSON.parse(raw.slice(start, end + 1)) as T;
+  } catch {
+    throw new Error('AI 응답 JSON 해석에 실패했습니다. 다시 시도해주세요.');
+  }
 }
-
-export const SYSTEM_VARIANCE = `당신은 기업 재무팀의 관리회계 담당자입니다.
-월마감 후 비용 변동사유 보고 초안을 작성합니다.
-원칙:
-- 제공된 데이터(금액, 적요, 거래처)에 근거해서만 작성. 데이터에 없는 내용은 추론 금지.
-- 적요가 없으면 "적요 미기재, 담당 부서 확인 필요"라고 명시.
-- 2~3문장, 보고서 문체(개조식 지양, 간결한 서술).
-- 금액은 원 단위 콤마 표기.`;
-
-export const SYSTEM_REPORT = `당신은 CFO에게 보고하는 관리회계 담당자입니다.
-주어진 월간 실적·예산 대비 데이터와 확정된 변동사유를 바탕으로 4~6문장의 종합 코멘트를 작성합니다.
-데이터에 없는 내용은 언급하지 말고, 확정 사유가 없는 항목은 "사유 확인 중"으로 표기하십시오.`;

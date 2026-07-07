@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import type { MappedRow, BudgetRecord } from '@/types/finance';
+import type { MonthlyInsightPack } from '@/lib/insightEngine';
 import type { AppSettings } from '@/types/settings';
 import { bvaByAccount, budgetVersions, monthlyTotals } from '@/lib/insights';
 import { fmtWon, fmtPct, fmtCompact } from '@/lib/format';
@@ -17,9 +18,10 @@ interface Props {
   setVersion: (v: string) => void;
   settings: AppSettings;
   goToData: () => void;
+  pack: MonthlyInsightPack | null;
 }
 
-export default function BvaView({ rows, budgets, periods, period, setPeriod, version, setVersion, settings, goToData }: Props) {
+export default function BvaView({ rows, budgets, periods, period, setPeriod, version, setVersion, settings, goToData, pack }: Props) {
   const versions = useMemo(() => budgetVersions(budgets), [budgets]);
   const bva = useMemo(() => bvaByAccount(rows, budgets, period, version), [rows, budgets, period, version]);
 
@@ -154,6 +156,38 @@ export default function BvaView({ rows, budgets, periods, period, setPeriod, ver
           B/(W): Better/(Worse). 괄호(음수)는 실적이 예산을 초과한 불리한 차이입니다. "미편성"은 실적은 있으나 해당 버전 예산이 없는 계정입니다.
         </p>
       </div>
+
+      {/* 연말 착지 전망 */}
+      {pack && pack.landing.filter(l => l.ratio > 1).length > 0 && (
+        <div className="panel overflow-hidden mt-5">
+          <div className="px-4 py-3 border-b border-border">
+            <h2 className="text-sm font-semibold">연말 착지 전망 — 연간예산 초과 우려 계정</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">전망 = YTD 실적 + 최근 3개월 평균 × 잔여월 (계절성·일회성 계획 미반영 단순 추정)</p>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-secondary">
+              <tr className="text-xs text-muted-foreground">
+                <th className="px-4 py-2 text-left font-medium">계정명</th>
+                <th className="px-4 py-2 text-right font-medium">연간예산</th>
+                <th className="px-4 py-2 text-right font-medium">YTD 실적</th>
+                <th className="px-4 py-2 text-right font-medium">착지 전망</th>
+                <th className="px-4 py-2 text-right font-medium">예산 대비</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pack.landing.filter(l => l.ratio > 1).slice(0, 10).map(l => (
+                <tr key={l.account_name} className="border-t border-border">
+                  <td className="px-4 py-1.5">{l.account_name}</td>
+                  <td className="px-4 py-1.5 text-right num">{fmtWon(l.annualBudget)}</td>
+                  <td className="px-4 py-1.5 text-right num">{fmtWon(l.ytdActual)}</td>
+                  <td className="px-4 py-1.5 text-right num">{fmtWon(l.projected)}</td>
+                  <td className="px-4 py-1.5 text-right num text-destructive font-semibold">{fmtPct(l.ratio)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -24,6 +24,7 @@ interface Props {
   upsertCommentary: (entry: CommentaryEntry) => void;
   analysis: MonthlyAnalysis | null;
   analysisStatus: AnalysisStatus;
+  embedded?: boolean;
 }
 
 interface TargetItem {
@@ -37,7 +38,7 @@ interface TargetItem {
   reasons: string[];
 }
 
-export default function VarianceView({ rows, budgets, periods, period, setPeriod, version, settings, commentary, upsertCommentary, analysis, analysisStatus }: Props) {
+export default function VarianceView({ rows, budgets, periods, period, setPeriod, version, settings, commentary, upsertCommentary, analysis, analysisStatus, embedded }: Props) {
   const [edits, setEdits] = useState<Record<string, string>>({}); // 사용자가 손댄 텍스트만 보관
 
   const targets = useMemo<TargetItem[]>(() => {
@@ -136,21 +137,28 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
   const confirmedCount = targets.filter(t => entryOf(t.account_name)?.status === 'confirmed').length;
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <PageHeader
-        title="차이분석 · 변동사유"
-        desc={`${periodLabel(period)} · AI가 전 항목 초안을 자동 작성 — 검토 후 수정·확정하면 월간 리포트에 반영됩니다 · 확정 ${confirmedCount}/${targets.length}`}
-        right={
-          <>
-            <Button variant="outline" size="sm" onClick={handleConfirmAll} disabled={targets.length === 0}>전체 일괄 확정</Button>
-            <MonthSelect periods={periods} value={period} onChange={setPeriod} />
-          </>
-        }
-      />
+    <div className={embedded ? '' : 'p-6 max-w-5xl mx-auto'}>
+      {!embedded ? (
+        <PageHeader
+          title="차이분석 · 변동사유"
+          desc={`${periodLabel(period)} · 초안이 자동 작성됩니다 — 검토 후 수정·확정하면 월간 리포트에 반영 · 확정 ${confirmedCount}/${targets.length}`}
+          right={
+            <>
+              <Button variant="outline" size="sm" onClick={handleConfirmAll} disabled={targets.length === 0}>전체 일괄 확정</Button>
+              <MonthSelect periods={periods} value={period} onChange={setPeriod} />
+            </>
+          }
+        />
+      ) : (
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-sm text-muted-foreground">초안을 검토해 수정·확정하면 월간 리포트에 반영됩니다 · 확정 {confirmedCount}/{targets.length}</p>
+          <Button variant="outline" size="sm" onClick={handleConfirmAll} disabled={targets.length === 0}>전체 일괄 확정</Button>
+        </div>
+      )}
 
       {analysisStatus === 'running' && (
         <div className="panel p-3 mb-4 flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" /> AI가 변동사유 초안을 작성하는 중입니다… 완료되면 아래 입력란에 자동으로 채워집니다.
+          <Loader2 className="h-4 w-4 animate-spin" /> 변동사유 초안을 작성하는 중입니다… 완료되면 아래 입력란에 자동으로 채워집니다.
         </div>
       )}
       {analysisStatus === 'no-key' && (
@@ -177,7 +185,7 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
                   {entry?.status === 'confirmed' ? (
                     <span className="text-[11px] px-2 py-0.5 rounded bg-accent text-accent-foreground flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> 확정</span>
                   ) : origin === 'ai' ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning-foreground))]">AI 초안 — 검토 전</span>
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning-foreground))]">초안 · 검토 전</span>
                   ) : entry ? (
                     <span className="text-[11px] px-2 py-0.5 rounded bg-secondary text-muted-foreground">작성 중</span>
                   ) : (
@@ -209,7 +217,7 @@ export default function VarianceView({ rows, budgets, periods, period, setPeriod
                 />
                 <div className="flex items-center gap-2 mt-2.5">
                   <p className="text-[11px] text-muted-foreground flex-1">
-                    {origin === 'ai' && 'AI 초안입니다 — 검토 후 확정하십시오.'}
+                    {origin === 'ai' && '자동 작성 초안입니다 — 검토 후 확정하십시오.'}
                     {entry?.source === 'ai-draft' && origin === 'saved' && 'AI 초안 기반으로 저장된 사유입니다.'}
                   </p>
                   <Button variant="outline" size="sm" onClick={() => handleSave(item, 'draft')}>임시 저장</Button>
